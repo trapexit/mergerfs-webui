@@ -2018,7 +2018,7 @@
         </section>
         <section class="persistence-panel" aria-labelledby="webui-service-title">
           <h2 id="webui-service-title">mergerfs-webui service</h2>
-          <p class="persistence-note">Set up a systemd system service at <code>/etc/systemd/system/mergerfs-webui.service</code>. The root-run server can atomically copy its running version over <code>/usr/local/bin/mergerfs-webui</code>, or use the currently running executable without copying it. Choose the listener address, port, and authentication independently. Localhost accepts only server-local connections; all interfaces accepts connections on the server's network addresses. Network exposure, writable executable paths, and plain HTTP have security risks, but warnings do not restrict your choices. Setup still requires root, systemd, valid inputs, and safe installation destinations. Installed options are read-only: remove the unit and set it up again to change them. Keep this tab open until you save any new password.</p>
+          <p class="persistence-note">Set up a systemd system service at <code>/etc/systemd/system/mergerfs-webui.service</code>. The root-run server can atomically copy its running version over <code>/usr/local/bin/mergerfs-webui</code>, or use the currently running executable without copying it. Choose the listener address, port, and authentication independently. Localhost accepts only server-local connections; all interfaces accepts connections on the server's network addresses. Network exposure, writable executable paths, and plain HTTP have security risks, but warnings do not restrict your choices. Setup still requires root, systemd, valid inputs, and safe installation destinations. Installed listener, port, and authentication options can be changed in place and applied with a service restart; the executable mode stays fixed. Keep this tab open until you save any new password.</p>
           <p class="persistence-note">Browser writes must come from this application's origin; cross-site and same-site-but-cross-origin requests are rejected. API request bodies must use <code>Content-Type: application/json</code>; empty commands need no content type. HTTP and HTTPS browser origins are supported, but a reverse proxy must preserve the browser's <code>Host</code> header, including any non-default port. Forwarded headers do not authorize an origin. These checks do not replace password authentication or restrict non-browser clients.</p>
           <div class="persistence-status" id="webui-service-status" role="status" aria-live="polite">Service status not checked yet.</div>
           <div class="form-group">
@@ -2045,7 +2045,7 @@
           <div class="form-group">
             <label for="webui-service-port">Service port</label>
             <input id="webui-service-port" type="number" min="1" max="65535" step="1" inputmode="numeric" aria-describedby="webui-service-port-help" disabled>
-            <p class="persistence-note" id="webui-service-port-help">Enter a TCP port from 1 to 65535. To change installed options, remove the unit and set it up again.</p>
+            <p class="persistence-note" id="webui-service-port-help">Enter a TCP port from 1 to 65535. Applied changes restart the service; the executable mode stays fixed.</p>
           </div>
           <div class="form-group" id="webui-service-password-choice">
             <label for="webui-service-password-mode">Service authentication</label>
@@ -2055,6 +2055,15 @@
               <option value="new">Use a new password</option>
             </select>
             <p class="persistence-note">This choice is independent of the current server's authentication. Requests to this server still require its configured password. Without a service password, anyone who can reach its listener can use its write endpoints, including privileged installation APIs. Plain HTTP exposes passwords in transit; use HTTPS/TLS when needed.</p>
+            <div id="webui-service-credential" hidden>
+              <p class="persistence-note warning" id="webui-service-password-warning">Copy and save this password before closing this tab. A new service password replaces the managed password during setup, even if starting the service later fails. It is not stored in this browser for later visits. Enter 1–128 printable ASCII characters, without spaces or controls; the generated default is 32 letters or digits.</p>
+              <div class="controls-row">
+                <label for="webui-service-password">New service password</label>
+                <input id="webui-service-password" type="text" minlength="1" maxlength="128" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="webui-service-password-warning">
+                <button class="button secondary" id="webui-service-copy-btn" type="button" aria-label="Copy service password">Copy password</button>
+              </div>
+              <p class="persistence-status" id="webui-service-copy-status" role="status" aria-live="polite"></p>
+            </div>
           </div>
           <div class="controls-row">
             <button class="button" id="webui-service-install-btn" type="button" disabled>Set up and start service</button>
@@ -2063,15 +2072,6 @@
           </div>
           <p class="persistence-status" id="webui-service-message" role="status" aria-live="polite"></p>
           <p class="persistence-note" id="webui-service-open-link-container" hidden><a id="webui-service-open-link" target="_blank" rel="noopener noreferrer"></a></p>
-          <div id="webui-service-credential" hidden>
-            <p class="persistence-note warning" id="webui-service-password-warning">Copy and save this password before closing this tab. A new service password replaces the managed password during setup, even if starting the service later fails. It is not stored in this browser for later visits. Enter 1–128 printable ASCII characters, without spaces or controls; the generated default is 32 letters or digits.</p>
-            <div class="controls-row">
-              <label for="webui-service-password">New service password</label>
-              <input id="webui-service-password" type="text" minlength="1" maxlength="128" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="webui-service-password-warning">
-              <button class="button secondary" id="webui-service-copy-btn" type="button" aria-label="Copy service password">Copy password</button>
-            </div>
-            <p class="persistence-status" id="webui-service-copy-status" role="status" aria-live="polite"></p>
-          </div>
         </section>
         <section class="persistence-panel" aria-labelledby="mergerfs-install-title">
           <h2 id="mergerfs-install-title">mergerfs install / update</h2>
@@ -2419,6 +2419,17 @@
               const body = { password_mode: passwordMode, mode, expected_executable: expectedExecutable, host, port };
               if (passwordMode === 'new') body.password = password;
               const response = await this.request('/service/install', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(body)
+              });
+              return await response.json();
+          },
+
+          async updateService(passwordMode, password, mode, expectedExecutable, host, port) {
+              const body = { password_mode: passwordMode, mode, expected_executable: expectedExecutable, host, port };
+              if (passwordMode === 'new') body.password = password;
+              const response = await this.request('/service/update', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify(body)
@@ -4085,6 +4096,25 @@
           return /^[!-~]{1,128}$/.test(document.getElementById('webui-service-password').value);
       }
 
+      function servicePasswordEdited() {
+          return document.getElementById('webui-service-password').value !== '';
+      }
+
+      function serviceOptionChanges(state, status) {
+          if (!status?.installed) return false;
+          return state.host !== status.host || Number(state.port) !== status.port ||
+              (state.passwordMode !== null && (
+                  state.passwordMode !== status.password_mode ||
+                  (state.passwordMode === 'new' && servicePasswordEdited())));
+      }
+
+      function effectiveServicePasswordMode(state, status, optionChanges) {
+          if (!status) return state.passwordMode;
+          if (status.installed && !optionChanges)
+              return status.password_mode === 'none' ? 'none' : 'current';
+          return state.passwordMode;
+      }
+
       function changeServicePasswordChoice() {
           const state = AppState.service;
           state.passwordMode = document.getElementById('webui-service-password-mode').value;
@@ -4104,14 +4134,14 @@
           const state = AppState.service;
           const status = state.status;
           if (status?.installed) state.mode = status.unit_mode || 'install';
-          if (status && (state.host === null || status.installed)) {
+          if (status && state.host === null) {
               state.host = status.host;
               state.hostMode = ['127.0.0.1', '0.0.0.0'].includes(state.host) ? state.host : 'custom';
               if (state.hostMode === 'custom') state.customHost = state.host;
           }
-          if (status && (state.port === null || status.installed)) state.port = String(status.port);
-          if (status && (state.passwordMode === null || status.installed)) state.passwordMode = status.password_mode;
-          const optionsDisabled = state.busy || !AppState.isAuthenticated || !status?.available || !!status?.installed;
+          if (status && state.port === null) state.port = String(status.port);
+          if (status && state.passwordMode === null) state.passwordMode = status.password_mode;
+          const optionsDisabled = state.busy || !AppState.isAuthenticated || !status?.available || state.handoff;
           const serviceStatus = document.getElementById('webui-service-status');
           if (status) {
               const details = document.createElement('dl');
@@ -4129,7 +4159,7 @@
                   : state.passwordMode === 'current'
                       ? 'Uses the current server password file.'
                       : status.password_retry && !state.passwordCreated
-                          ? 'Uses an existing managed service password. Start the service with that password unchanged, then sign in; remove and recreate the unit if you need a different password.'
+                          ? 'Uses an existing managed service password. Start the service with that password unchanged, then sign in; select a new password and apply changes to rotate it.'
                           : status.installed
                               ? 'Uses the managed service password. Save any password still shown below.'
                               : 'A new service password is selected; copy and save the password below.';
@@ -4138,7 +4168,7 @@
               serviceStatus.replaceChildren(details);
               const choiceHelp = document.getElementById('webui-service-executable-help');
               const message = status.installed
-                  ? `The installed unit uses ${status.executable}. Remove the unit and set it up again to change its executable, listener, port, or authentication.`
+                  ? `The installed unit uses ${status.executable}. Its listener, port, and authentication can be changed in place and applied with a service restart; remove the unit to change the executable or its installation mode.`
                   : state.mode === 'running'
                       ? 'The service uses the currently running executable without copying it. Anyone able to replace that executable or change its parent directories can change what this root service runs. This warning does not prevent direct use.'
                       : 'The running version replaces /usr/local/bin/mergerfs-webui atomically. Symlinks, hard links, and unsafe files are refused.';
@@ -4169,13 +4199,18 @@
           const validPort = /^[0-9]+$/.test(state.port ?? '') &&
               Number.isInteger(selectedPort) && selectedPort >= 1 && selectedPort <= 65535;
           if (!status) document.getElementById('webui-service-executable-help').textContent = '';
+          const optionChanges = serviceOptionChanges(state, status);
+          const effectivePasswordMode = effectiveServicePasswordMode(state, status, optionChanges);
           const button = document.getElementById('webui-service-install-btn');
-          button.textContent = status && status.installed ? 'Start service' : 'Set up and start service';
-          button.disabled = state.busy || !AppState.isAuthenticated || !status || !status.available || status.active ||
+          button.textContent = status && status.installed ?
+              (optionChanges ? 'Apply changes and restart service' : 'Start service') :
+              'Set up and start service';
+          button.disabled = state.busy || !AppState.isAuthenticated || !status || !status.available ||
               !validPort || !serviceHostValid(state.host) ||
+              (!optionChanges && status.active) ||
               (!status.installed && (state.mode === 'running' ? !status.running_available : !status.executable)) ||
-              (!status.installed && state.passwordMode === 'current' && !status.password_file) ||
-              (!status.installed && state.passwordMode === 'new' && !servicePasswordValid());
+              (effectivePasswordMode === 'current' && !status.password_file) ||
+              (effectivePasswordMode === 'new' && !servicePasswordValid());
           const stopButton = document.getElementById('webui-service-stop-btn');
           stopButton.hidden = !AppState.isAuthenticated || !status?.available || !status.installed || !status.active;
           stopButton.disabled = state.busy || stopButton.hidden;
@@ -4187,9 +4222,12 @@
           passwordSelect.querySelector('[value="current"]').disabled = !status?.password_file;
           passwordSelect.disabled = optionsDisabled;
           const field = document.getElementById('webui-service-password');
-          field.readOnly = state.busy || !!status?.installed || state.handoff;
+          field.readOnly = state.busy || state.handoff ||
+              (!!status?.installed && !optionChanges);
           document.getElementById('webui-service-credential').hidden =
-              !(state.passwordCreated || (!state.handoff && !status?.installed && state.passwordMode === 'new'));
+              !(state.passwordCreated ||
+                (!state.handoff && state.passwordMode === 'new' &&
+                 (!status?.installed || servicePasswordEdited())));
           const message = document.getElementById('webui-service-message');
           message.classList.toggle('error', state.error);
           renderInlineValues(message, state.message, [status?.path]);
@@ -4410,7 +4448,9 @@
       async function installWebuiService() {
           const state = AppState.service;
           const status = state.status;
-          if (state.busy || !AppState.isAuthenticated || !status || !status.available || status.active ||
+          const optionChanges = serviceOptionChanges(state, status);
+          if (state.busy || !AppState.isAuthenticated || !status || !status.available ||
+              (!optionChanges && status.active) ||
               (!status.installed && (state.mode === 'running' ? !status.running_available : !status.executable))) return;
           const requestedPort = Number(state.port);
           if (!/^[0-9]+$/.test(state.port ?? '') ||
@@ -4427,11 +4467,9 @@
               renderServiceStatus();
               return;
           }
-          const passwordMode = status.installed
-              ? status.password_mode === 'none' ? 'none' : 'current'
-              : state.passwordMode;
+          const passwordMode = effectiveServicePasswordMode(state, status, optionChanges);
           const password = passwordMode === 'new' ? document.getElementById('webui-service-password').value : null;
-          if ((!status.installed && passwordMode === 'current' && !status.password_file) ||
+          if ((passwordMode === 'current' && !status.password_file) ||
               !['none', 'current', 'new'].includes(passwordMode)) return;
           if (passwordMode === 'new' && !servicePasswordValid()) {
               state.error = true;
@@ -4441,11 +4479,14 @@
           }
           const mode = state.mode;
           const executable = !status.installed && mode === 'running' ? status.running_executable : status.executable;
-          const action = status.installed
-              ? 'Start the existing mergerfs-webui systemd service without changing its options'
-              : mode === 'install'
-                  ? `Copy the running version over ${executable} and install, enable and start the mergerfs-webui systemd service`
-                  : `Install, enable and start the mergerfs-webui systemd service using the currently running executable at ${executable} without copying it. Anyone able to replace this executable can change what the root service runs`;
+          const updating = !!status.installed && optionChanges;
+          const action = updating
+              ? `Apply the new listener ${requestedHost}:${requestedPort} and authentication, then restart the mergerfs-webui systemd service`
+              : status.installed
+                  ? 'Start the existing mergerfs-webui systemd service without changing its options'
+                  : mode === 'install'
+                      ? `Copy the running version over ${executable} and install, enable and start the mergerfs-webui systemd service`
+                      : `Install, enable and start the mergerfs-webui systemd service using the currently running executable at ${executable} without copying it. Anyone able to replace this executable can change what the root service runs`;
           const credential = passwordMode === 'none'
               ? ' The service will have no authentication: anyone who can reach its listener can use its write endpoints, including privileged installation APIs.'
               : passwordMode === 'new'
@@ -4466,11 +4507,18 @@
           let refresh = false;
           try {
               const oldInstanceId = AppState.update.instanceId;
-              const response = await API.installService(passwordMode, password, mode, executable, requestedHost, requestedPort);
-              if ((response.result !== 'starting' && response.result !== 'active') ||
-                  !serviceHostValid(response.host) || !Number.isInteger(response.port) ||
-                  response.port < 1 || response.port > 65535 ||
-                  !['none', 'current', 'new'].includes(response.password_mode)) throw new Error('Unexpected service response');
+              const response = updating
+                  ? await API.updateService(passwordMode, password, mode, executable, requestedHost, requestedPort)
+                  : await API.installService(passwordMode, password, mode, executable, requestedHost, requestedPort);
+              const validResults = updating
+                  ? (response.result === 'restarting' && response.httpStatus === 202) ||
+                    (response.result === 'restarted' && response.httpStatus === 200)
+                  : response.result === 'starting' || response.result === 'active';
+              const validDestination = serviceHostValid(response.host) &&
+                  Number.isInteger(response.port) &&
+                  response.port >= 1 && response.port <= 65535 &&
+                  ['none', 'current', 'new'].includes(response.password_mode);
+              if (!validResults || !validDestination) throw new Error('Unexpected service response');
               const destinationPassword = response.password_mode === 'new'
                   ? passwordMode === 'new' ? response.password || password
                       : state.passwordCreated && servicePasswordValid()
@@ -4527,8 +4575,10 @@
                               : 'The service does not require a password.';
                   return;
               }
-              if (response.result === 'starting') {
-                  state.message = 'Service starting; waiting for the browser connection to return...';
+              if (response.result === 'starting' || response.result === 'restarting') {
+                  state.message = response.result === 'restarting'
+                      ? 'Applying service changes; waiting for the restarted service to respond...'
+                      : 'Service starting; waiting for the browser connection to return...';
                   renderServiceStatus();
                   let switched = false;
                   for (let attempt = 0; attempt < 120; attempt++) {
