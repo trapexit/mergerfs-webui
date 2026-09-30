@@ -31,7 +31,7 @@ def verify_login(base, version):
             assert auth.value.json()['password_required'] is True
             # The response can arrive before the page's async initAuth finishes.
             page.wait_for_function('AppState.passwordRequired === true')
-            expect(page.locator('header h1')).to_have_text(f'mergerfs ui {version}')
+            expect(page.locator('#app-version')).to_have_text(version)
             password = page.locator('#password-input')
             verify = page.locator('#auth-btn')
             restart = page.locator('#restart-server-btn')
