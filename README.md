@@ -31,8 +31,24 @@ suggestions.
 
 ## Download and install
 
-Download a static binary for your platform from the
-[releases](https://github.com/trapexit/mergerfs-webui/releases).
+The installer selects the latest stable Linux release for x86-64,
+AArch64, ARMv7/ARMv8 32-bit hard-float, or RISC-V 64-bit:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/trapexit/mergerfs-webui/HEAD/install.sh | sh
+```
+
+It requires `curl`, `jq`, and standard Linux utilities (including
+`getconf`, `sha256sum`, and GNU-compatible `install` and `mv`). It
+checks the executable against GitHub's release-asset SHA-256 digest
+before installing to `/usr/local/bin/mergerfs-webui`. Downloads and
+verification run as your current user; only installation uses `sudo`
+when needed. An existing running executable can be replaced, but no
+service is started or restarted automatically.
+
+Alternatively, download a static binary for your platform from the
+[releases](https://github.com/trapexit/mergerfs-webui/releases) and
+install it manually:
 
 ```
 $ sudo install -m 0755 mergerfs-webui_x86_64-linux-musl /usr/local/bin/mergerfs-webui
