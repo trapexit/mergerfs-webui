@@ -196,6 +196,8 @@ def verify_unit_writer(driver):
 
         def write(args=arguments):
             return subprocess.run(args, capture_output=True, text=True, check=False)
+        def run(*arguments):
+            return subprocess.run(arguments, capture_output=True, text=True, check=False)
 
         first = write()
         assert first.returncode == 0 and first.stdout.strip() == 'created', first
@@ -228,6 +230,20 @@ def verify_unit_writer(driver):
         alternate = write([*no_password[:-1], 'other-port'])
         assert alternate.returncode == 0 and alternate.stdout.strip() == 'created', alternate
         assert ' --port 8081\n' in unit.read_text()
+
+        # Any real port must work, not only the sentinel values the writer takes.
+        unit.unlink()
+        written = write([*no_password[:-1], '45231'])
+        assert written.returncode == 0, written
+        assert ' --port 45231\n' in unit.read_text()
+        resourced = run(str(driver), 'replace', str(units),
+                        '/usr/local/bin/mergerfs-webui', '127.0.0.1', 'none', '45231',
+                        '/usr/local/bin/mergerfs-webui', '0.0.0.0', 'none', '45232')
+        assert resourced.returncode == 0 and resourced.stdout.strip() == 'replaced', resourced
+        assert ' --port 45232\n' in unit.read_text()
+        assert run(str(driver), 'replace', str(units),
+                   '/usr/local/bin/mergerfs-webui', '127.0.0.1', 'none', '45231',
+                   '/usr/local/bin/mergerfs-webui', '0.0.0.0', 'none', 'same-port').returncode != 0
 
         unit.unlink()
         victim = Path(directory) / 'victim'
@@ -301,6 +317,94 @@ def verify_unit_inspection(driver):
         assert run('inspect', units).returncode != 0
         assert credential.read_bytes() == b'existing-secret\n'
         print('sandbox installed configuration discovery and collision safeguards: passed')
+
+
+def verify_unit_replacement(driver):
+    with tempfile.TemporaryDirectory(prefix='mergerfs-unit-replace-test-') as directory:
+        root = Path(directory)
+        units = root / 'units'
+        units.mkdir(mode=0o700)
+        unit = units / 'mergerfs-webui.service'
+        credentials = root / 'credentials'
+
+        def run(*arguments):
+            return subprocess.run(arguments, capture_output=True, text=True, check=False)
+
+        def write(executable='/usr/local/bin/mergerfs-webui', host='127.0.0.1',
+                  password='/etc/mergerfs-webui/password', port='default'):
+            return run(str(driver), str(units), executable, host, password, port)
+
+        assert write().stdout.strip() == 'created', write()
+        original = unit.read_bytes()
+        original_inode = unit.stat().st_ino
+
+        # Identical replacement is refused before touching the unit.
+        same = run(str(driver), 'replace', str(units),
+                   '/usr/local/bin/mergerfs-webui', '127.0.0.1',
+                   '/etc/mergerfs-webui/password', 'default',
+                   '/usr/local/bin/mergerfs-webui', '127.0.0.1',
+                   '/etc/mergerfs-webui/password', 'default-port')
+        assert same.returncode != 0 and unit.read_bytes() == original, same
+        assert unit.stat().st_ino == original_inode
+
+        # A mismatched current unit is refused; the file stays untouched.
+        mismatched = run(str(driver), 'replace', str(units),
+                         '/usr/local/bin/mergerfs-webui', '0.0.0.0',
+                         '/etc/mergerfs-webui/password', 'default',
+                         '/usr/local/bin/mergerfs-webui', '127.0.0.1',
+                         'none', 'default-port')
+        assert mismatched.returncode != 0 and unit.read_bytes() == original, mismatched
+        assert unit.stat().st_ino == original_inode
+
+        # Changing host and dropping the password replaces the unit atomically.
+        updated = run(str(driver), 'replace', str(units),
+                      '/usr/local/bin/mergerfs-webui', '127.0.0.1',
+                      '/etc/mergerfs-webui/password', 'default',
+                      '/usr/local/bin/mergerfs-webui', '0.0.0.0',
+                      'none', 'default-port')
+        assert updated.returncode == 0 and updated.stdout.strip() == 'replaced', updated
+        text = unit.read_text()
+        assert ('ExecStart=/usr/local/bin/mergerfs-webui --host 0.0.0.0'
+                ' --port 8080\n') in text
+        assert '--password-file' not in text
+        assert unit.stat().st_mode & 0o777 == 0o644
+        assert unit.stat().st_nlink == 1
+
+        # The old unit content no longer matches; removal refuses it.
+        stale = run(str(driver), 'remove', str(units),
+                    '/usr/local/bin/mergerfs-webui', '127.0.0.1',
+                    '/etc/mergerfs-webui/password', 'default')
+        assert stale.returncode != 0 and unit.exists(), stale
+        current = run(str(driver), 'inspect', str(units))
+        assert current.returncode == 0 and current.stdout.strip() == (
+            '/usr/local/bin/mergerfs-webui\t0.0.0.0\t8080'), current
+
+        # Unsafe new hosts and injection attempts are rejected before writing.
+        for arguments in (
+                ['/usr/local/bin/mergerfs-webui', '127.0.0.1', 'none', 'default-port'],
+                ['/usr/local/bin/mergerfs-webui', 'bad host', 'none', 'default-port'],
+                ['/tmp/injected\n[Service]', '127.0.0.1', 'none', 'default-port']):
+            before = unit.read_bytes()
+            rejected = run(str(driver), 'replace', str(units),
+                           '/usr/local/bin/mergerfs-webui', '0.0.0.0',
+                           'none', 'default-port', *arguments)
+            assert rejected.returncode != 0 and unit.read_bytes() == before, rejected
+
+        # Only an existing managed password can be replaced.
+        absent = run(str(driver), 'replace-password', str(credentials), 'secret')
+        assert absent.returncode != 0 and not (credentials / 'password').exists(), absent
+        run(str(driver), 'password', str(credentials), 'old-secret')
+        managed = credentials / 'password'
+        assert managed.read_bytes() == b'old-secret\n'
+        replaced = run(str(driver), 'replace-password', str(credentials), 'new-secret')
+        assert replaced.returncode == 0, replaced
+        assert managed.read_bytes() == b'new-secret\n'
+        assert managed.stat().st_mode & 0o7777 == 0o600
+        for invalid in ('', 'A' * 129, 'has space', 'control\n'):
+            before = managed.read_bytes()
+            denied = run(str(driver), 'replace-password', str(credentials), invalid)
+            assert denied.returncode != 0 and managed.read_bytes() == before, denied
+        print('sandbox in-place unit and credential replacement: passed')
 
 
 def verify_unit_removal(driver):
@@ -555,5 +659,6 @@ if __name__ == '__main__':
     verify(binary)
     verify_unit_inspection(driver)
     verify_unit_writer(driver)
+    verify_unit_replacement(driver)
     verify_unit_removal(driver)
     verify_install_files(driver)

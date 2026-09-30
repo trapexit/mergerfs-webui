@@ -102,4 +102,18 @@ namespace ServiceInstall
   remove_unit(const Spec        &spec,
               const std::string &directory,
               std::string       *error);
+
+  // Atomically replace the installed unit while systemd observes its old inode.
+  int
+  replace_unit(const Spec        &current,
+               const Spec        &spec,
+               const std::string &directory,
+               bool              *created,
+               std::string       *error);
+
+  // Atomically replace only a managed password set by create_password.
+  int
+  replace_password(const std::string &directory,
+                   const std::string &secret,
+                   std::string       *error);
 }

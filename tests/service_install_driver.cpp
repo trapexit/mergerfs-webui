@@ -67,6 +67,70 @@ main(int    argc_,
       return 0;
     }
 
+  if((argc_ == 4) && (std::strcmp(argv_[1],"replace-password") == 0))
+    {
+      std::string error;
+      if(ServiceInstall::replace_password(argv_[2],argv_[3],&error) != 0)
+        {
+          std::cerr << error << '\n';
+          return 1;
+        }
+
+      std::cout << "replaced\n";
+      return 0;
+    }
+
+  if((argc_ == 11) && (std::strcmp(argv_[1],"replace") == 0))
+    {
+      ServiceInstall::Spec current{argv_[3],argv_[4],8080,
+                                   std::strcmp(argv_[5],"none") == 0 ? "" : argv_[5]};
+      if(std::strcmp(argv_[6],"other-port") == 0)
+        current.port = 8081;
+      else if(std::strcmp(argv_[6],"default") != 0)
+        {
+          int port = 0;
+          const auto end = argv_[6] + std::strlen(argv_[6]);
+          const auto parsed = std::from_chars(argv_[6],end,port);
+          if((parsed.ec != std::errc{}) || (parsed.ptr != end) ||
+             (port < 1) || (port > 65535))
+            {
+              std::cerr << "unknown current port: " << argv_[6] << '\n';
+              return 2;
+            }
+          current.port = port;
+        }
+      ServiceInstall::Spec spec{argv_[7],argv_[8],8081,
+                                std::strcmp(argv_[9],"none") == 0 ? "" : argv_[9]};
+      if(std::strcmp(argv_[10],"default-port") == 0)
+        spec.port = 8080;
+      else if(std::strcmp(argv_[10],"same-port") == 0)
+        spec.port = current.port;
+      else
+        {
+          int port = 0;
+          const auto end = argv_[10] + std::strlen(argv_[10]);
+          const auto parsed = std::from_chars(argv_[10],end,port);
+          if((parsed.ec != std::errc{}) || (parsed.ptr != end) ||
+             (port < 1) || (port > 65535))
+            {
+              std::cerr << "unknown new port: " << argv_[10] << '\n';
+              return 2;
+            }
+          spec.port = port;
+        }
+      bool created = false;
+      std::string error;
+      int rv = ServiceInstall::replace_unit(current,spec,argv_[2],&created,&error);
+      if(rv < 0)
+        {
+          std::cerr << rv << ": " << error << '\n';
+          return 1;
+        }
+
+      std::cout << (created ? "replaced" : "unchanged") << '\n';
+      return 0;
+    }
+
   if((argc_ == 4) && (std::strcmp(argv_[1],"validate") == 0))
     {
       ServiceInstall::Spec spec{argv_[2],"0.0.0.0",8080,

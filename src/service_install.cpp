@@ -774,6 +774,106 @@ namespace ServiceInstall
 
 
   int
+  replace_password(const std::string &directory_,
+                   const std::string &secret_,
+                   std::string       *error_)
+  {
+    struct stat previous;
+    unsigned long long random;
+    char temporary[STAGING_NAME_BUFFER_SIZE];
+    std::array<char,MAX_SECRET_LENGTH + 1> text;
+    size_t offset;
+    int rc;
+    UpdateIO::FD dir;
+    UpdateIO::FD existing;
+    UpdateIO::FD file;
+    const auto printable = [](unsigned char c_)
+    {
+      return ((c_ >= 33) && (c_ <= 126));
+    };
+    const auto abort = [&](int code_,const char *message_)
+    {
+      ::unlinkat(dir.value,temporary,0);
+      return UpdateIO::fail(error_,code_,message_);
+    };
+    if((secret_.empty()) ||
+       (secret_.size() > MAX_SECRET_LENGTH) ||
+       (!std::all_of(secret_.begin(),secret_.end(),printable)))
+      {
+        return UpdateIO::fail(error_,
+                              EINVAL,
+                              "managed password must be printable without spaces or controls");
+      }
+
+    rc = managed_directory(directory_,PASSWORD_DIRECTORY_MODE,true,&dir,error_);
+    if(rc)
+      return rc;
+
+    existing.value =
+        ::openat(dir.value,MANAGED_PASSWORD_NAME,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
+    if(existing.value < 0)
+      {
+        return UpdateIO::fail(error_,
+                              errno == ENOENT ? ENOENT :
+                                errno == ELOOP ? EEXIST : errno,
+                              "no managed password exists to replace");
+      }
+    if(::fstat(existing.value,&previous) < 0)
+      return UpdateIO::fail(error_,errno,"cannot inspect managed password");
+    if((!S_ISREG(previous.st_mode)) ||
+       (previous.st_uid != ::geteuid()) ||
+       (previous.st_mode & NON_OWNER_ACCESS_BITS) ||
+       (previous.st_nlink != 1))
+      return UpdateIO::fail(error_,EEXIST,"an unsafe managed password already exists");
+
+    if(::getrandom(&random,sizeof(random),0) != static_cast<ssize_t>(sizeof(random)))
+      return UpdateIO::fail(error_,EIO,"cannot reserve random password staging name");
+    std::snprintf(temporary,sizeof(temporary),".password-%016llx",random);
+    file.value = ::openat(dir.value,
+                          temporary,
+                          O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,
+                          PRIVATE_MODE);
+    if(file.value < 0)
+      return UpdateIO::fail(error_,errno,"cannot stage managed password");
+    std::memcpy(text.data(),secret_.data(),secret_.size());
+    text[secret_.size()] = '\n';
+    offset               = 0;
+    while(offset < secret_.size() + 1)
+      {
+        ssize_t n;
+        n = ::write(file.value,text.data() + offset,secret_.size() + 1 - offset);
+        if((n < 0) && (errno == EINTR))
+          continue;
+        if(n <= 0)
+          return abort(n < 0 ? errno : EIO,"cannot write managed password");
+        offset += static_cast<size_t>(n);
+      }
+
+    if(::fsync(file.value) < 0)
+      return abort(errno,"cannot sync managed password");
+    struct stat current;
+    if((::fstatat(dir.value,MANAGED_PASSWORD_NAME,&current,AT_SYMLINK_NOFOLLOW) < 0) ||
+       (current.st_dev != previous.st_dev) ||
+       (current.st_ino != previous.st_ino) ||
+       (current.st_mode != previous.st_mode) ||
+       (current.st_uid != previous.st_uid) ||
+       (current.st_nlink != previous.st_nlink) ||
+       (current.st_size != previous.st_size) ||
+       (current.st_mtim.tv_sec != previous.st_mtim.tv_sec) ||
+       (current.st_mtim.tv_nsec != previous.st_mtim.tv_nsec) ||
+       (current.st_ctim.tv_sec != previous.st_ctim.tv_sec) ||
+       (current.st_ctim.tv_nsec != previous.st_ctim.tv_nsec))
+      return abort(EAGAIN,PASSWORD_DESTINATION_CHANGED);
+    if(::renameat(dir.value,temporary,dir.value,MANAGED_PASSWORD_NAME) < 0)
+      return abort(errno,"cannot replace managed password");
+
+    if(::fsync(dir.value) < 0)
+      return UpdateIO::fail(error_,errno,"managed password replaced but directory sync failed");
+    return 0;
+  }
+
+
+  int
   validate_arguments(const Spec &spec_,
                      std::string *error_)
   {
@@ -956,6 +1056,134 @@ namespace ServiceInstall
       return UpdateIO::fail(error_,errno,"cannot remove mergerfs-webui service unit");
     if(::fsync(dir.value) < 0)
       return UpdateIO::fail(error_,errno,"cannot sync systemd unit directory after removal");
+    return 0;
+  }
+
+
+  int
+  replace_unit(const Spec        &current_,
+               const Spec        &spec_,
+               const std::string &directory_,
+               bool              *created_,
+               std::string       *error_)
+  {
+    int rc;
+    struct stat original;
+    struct stat current;
+    bool installed;
+    UpdateIO::FD dir;
+    UpdateIO::FD unit;
+    rc = check_spec(current_,error_);
+    if(rc)
+      return rc;
+    rc = check_spec(spec_,error_);
+    if(rc)
+      return rc;
+    rc = open_unit_directory(directory_,&dir,error_);
+    if(rc)
+      return rc;
+    // Confirm the current unit text first; reject anything we did not install.
+    installed = false;
+    rc        = read_existing(dir.value,unit_text(current_),&installed,error_,nullptr,&original);
+    if(rc)
+      return rc;
+    if(!installed)
+      {
+        return UpdateIO::fail(error_,
+                              ENOENT,
+                              "mergerfs-webui service unit is not installed for this change");
+      }
+
+    const std::string text = unit_text(spec_);
+    if(text == unit_text(current_))
+      {
+        // Nothing to replace; leave the installed unit and its inode alone.
+        return UpdateIO::fail(error_,
+                              EALREADY,
+                              "the requested service unit is already installed");
+      }
+
+    // Write the proposed unit to a private staging name; keep the existing
+    // unit loaded until the very last renameat.
+    char temporary[STAGING_NAME_BUFFER_SIZE];
+    current = {};
+    unsigned long long random = 0;
+    if(::getrandom(&random,sizeof(random),0) != static_cast<ssize_t>(sizeof(random)))
+      {
+        return UpdateIO::fail(error_,
+                              EIO,
+                              "cannot reserve random service unit staging name");
+      }
+    std::snprintf(temporary,sizeof(temporary),".%016llx.service",random);
+    unit.value = ::openat(dir.value,
+                          temporary,
+                          O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,
+                          PRIVATE_MODE);
+    if(unit.value < 0)
+      return UpdateIO::fail(error_,errno,"cannot stage proposed mergerfs-webui service unit");
+
+    int code = 0;
+    size_t offset = 0;
+    while(offset < text.size())
+      {
+        ssize_t count;
+        count = ::write(unit.value,text.data() + offset,text.size() - offset);
+        if((count < 0) && (errno == EINTR))
+          continue;
+        if(count <= 0)
+          {
+            code = ((count < 0) ? errno : EIO);
+            break;
+          }
+
+        offset += static_cast<size_t>(count);
+      }
+
+    if((!code) && (::fchmod(unit.value,SERVICE_UNIT_MODE) < 0))
+      code = errno;
+    if((!code) && (::fsync(unit.value) < 0))
+      code = errno;
+    if(code)
+      {
+        struct stat written;
+        struct stat changed;
+        if((::fstat(unit.value,&written) == 0) &&
+           (::fstatat(dir.value,temporary,&changed,AT_SYMLINK_NOFOLLOW) == 0) &&
+           (written.st_dev == changed.st_dev) &&
+           (written.st_ino == changed.st_ino) &&
+           (changed.st_nlink == 1))
+          ::unlinkat(dir.value,temporary,0);
+        return UpdateIO::fail(error_,code,"cannot write proposed mergerfs-webui service unit");
+      }
+
+    // Nothing changed on disk until this point; systemd keeps running its
+    // current unit until we swap the name below.
+    if(::fstatat(dir.value,UNIT_NAME,&current,AT_SYMLINK_NOFOLLOW) < 0)
+      {
+        ::unlinkat(dir.value,temporary,0);
+        return UpdateIO::fail(error_,
+                              errno == ENOENT ? EAGAIN : errno,
+                              SERVICE_UNIT_CHANGED_BEFORE_REMOVAL);
+      }
+    if((current.st_dev != original.st_dev) || (current.st_ino != original.st_ino))
+      {
+        ::unlinkat(dir.value,temporary,0);
+        return UpdateIO::fail(error_,EAGAIN,SERVICE_UNIT_CHANGED_BEFORE_REMOVAL);
+      }
+    if(::renameat(dir.value,temporary,dir.value,UNIT_NAME) < 0)
+      {
+        int saved = errno;
+        ::unlinkat(dir.value,temporary,0);
+        return UpdateIO::fail(error_,saved,"cannot replace mergerfs-webui service unit");
+      }
+    if(::fsync(dir.value) < 0)
+      {
+        return UpdateIO::fail(error_,
+                              errno,
+                              "mergerfs-webui service unit replaced but directory sync failed");
+      }
+
+    *created_ = true;
     return 0;
   }
 }
