@@ -2,7 +2,8 @@
 
 mergerfs-webui is a browser-based tool for viewing and managing
 [mergerfs](https://github.com/trapexit/mergerfs) mounts on Linux. The
-server is a single executable with the web page built in.
+server is a single executable with the web server and web page built
+in.
 
 The page title and header use `mergerfs-webui`. The header also
 displays the running server's version, matching `--version`.
