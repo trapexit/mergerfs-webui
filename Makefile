@@ -81,6 +81,7 @@ build/test-service-install: build/.test_objs/service_install_driver.cpp.o $(OBJD
 	$(CXX) $(BUILD_FLAGS) -pthread $^ -o $@ $(LDFLAGS) $(RELEASE_LDFLAGS)
 
 test: $(OUTPUT) build/test-mergerfs-update build/test-service-install
+	$(PYTHON) tests/test_installer.py
 	$(PYTHON) tests/test_config_references.py $(OUTPUT)
 	$(PYTHON) tests/test_persistence_preview.py $(OUTPUT)
 	$(PYTHON) tests/test_update.py $(OUTPUT)
