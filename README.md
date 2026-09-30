@@ -5,11 +5,6 @@ mergerfs-webui is a browser-based tool for viewing and managing
 server is a single executable with the web server and web page built
 in.
 
-The page title and header use `mergerfs-webui`. The header also
-displays the running server's version, matching `--version`.
-Installing an update replaces the executable on disk; restart the
-server to display the new version.
-
 **NOTE:** This is a pre-1.0 release. UI and UX may not be
 ideal. Please file a
 [ticket](https://github.com/trapexit/mergerfs-webui/issues) with
