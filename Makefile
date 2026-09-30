@@ -17,6 +17,8 @@ PYTHON ?= python3
 ZIG_VENV ?= .venv
 SYSTEM_ZIG := $(shell command -v zig 2>/dev/null)
 ZIG ?= $(if $(SYSTEM_ZIG),$(SYSTEM_ZIG),$(abspath $(ZIG_VENV))/bin/python-zig)
+VERSION := $(or $(VERSION),$(shell date -u +%Y%m%d%H%M%S))
+export VERSION
 OUTPUT := build/mergerfs-webui$(if $(TARGET),_$(TARGET),)
 SRC  := $(wildcard src/*.cpp)
 HEADERS := $(wildcard src/*.h src/*.hpp vendored/*.h vendored/*.hpp)
@@ -42,7 +44,7 @@ ZIG_RELEASE_OPT := -Oz -flto -ffunction-sections -fdata-sections -static
 
 .DELETE_ON_ERROR:
 
-.PHONY: all clean distclean help release zig-venv test test-browser
+.PHONY: all clean distclean help release zig-venv test test-browser force-version
 all: $(OUTPUT)
 
 build:
@@ -54,6 +56,12 @@ build/index.html.gz: webui/index.html | build
 build/index_html_gz.h: build/index.html.gz
 	xxd -i -n index_html_gz $< > $@
 
+$(OBJDIR)/version.h: force-version | $(OBJDIR)
+	@printf 'static constexpr char VERSION[] = "%s";\n' "$(VERSION)" | cmp -s - $@ || \
+	  printf 'static constexpr char VERSION[] = "%s";\n' "$(VERSION)" > $@
+
+force-version:
+
 $(OUTPUT): Makefile $(OBJS) $(HEADERS)
 	$(CXX) $(BUILD_FLAGS) -pthread $(OBJS) -o $@ $(LDFLAGS) $(RELEASE_LDFLAGS)
 
@@ -63,10 +71,10 @@ $(OBJDIR):
 build/.test_objs:
 	mkdir -p $@
 
-$(OBJDIR)/main.cpp.o: build/index_html_gz.h
+$(OBJDIR)/main.cpp.o: build/index_html_gz.h $(OBJDIR)/version.h
 
 $(OBJDIR)/%.cpp.o: src/%.cpp Makefile | $(OBJDIR)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(BUILD_FLAGS) -Ivendored -Ibuild -pthread -c $< -o $@
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(BUILD_FLAGS) -Ivendored -I$(OBJDIR) -Ibuild -pthread -c $< -o $@
 
 build/.test_objs/%.cpp.o: tests/%.cpp Makefile | build/.test_objs
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(BUILD_FLAGS) -DMERGERFS_UPDATE_TEST -Isrc -Ivendored -pthread -c $< -o $@

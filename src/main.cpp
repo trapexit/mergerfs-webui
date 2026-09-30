@@ -25,6 +25,7 @@
 #include "service_install.hpp"
 #include "update.hpp"
 #include "update_io.hpp"
+#include "version.h"
 
 #include <algorithm>
 #include <array>
@@ -57,7 +58,6 @@
 
 using json = nlohmann::json;
 
-static constexpr char VERSION[] = "0.1";
 static constexpr char SYSTEMCTL_PATH[]      = "/usr/bin/systemctl";
 static constexpr size_t XATTR_GROWTH_FACTOR = 2;
 

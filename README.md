@@ -188,6 +188,24 @@ RTTI, section garbage collection, and stripped symbols). `make release`
 uses Zig and `-Oz` for static cross-platform Linux binaries; run
 `make zig-venv` first if Zig is not installed.
 
+Versions use the UTC build-start timestamp `YYYYMMDDHHMMSS`, for
+example `20260930130943`. There is no daily counter to maintain.
+The timestamp is selected once per `make` invocation and shared with
+recursive builds, so every architecture produced by `make release`
+has the same version. Builds started in the same second can share a
+version; timestamps are not a guarantee of unique build identity.
+
+A normal build selects a fresh timestamp, even for unchanged sources.
+To retain a published version across rebuilds, supply it explicitly:
+
+```sh
+make NDEBUG=1 VERSION=20260930130943
+make VERSION=20260930130943 release
+```
+
+Use the matching release tag, for example `v20260930130943`, when
+publishing those binaries.
+
 
 ## Support
 
