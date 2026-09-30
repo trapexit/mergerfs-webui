@@ -28,10 +28,6 @@ suggestions.
   before saving, or edit a discovered source as raw text.
 - Issue runtime commands.
 
-For fstab entries with `x-systemd.requires-mounts-for` dependencies,
-edit the branches to update their dependency list. A direct
-single-value edit cannot represent multiple branch dependencies and is
-rejected.
 
 ## Download and install
 
