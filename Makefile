@@ -110,6 +110,7 @@ help:
 	@echo "make NDEBUG=1         Size-optimized, statically linked native build (-Os, LTO, no RTTI, section GC, stripped)"
 	@echo "make zig-venv         Install pinned Zig if none is on PATH"
 	@echo "make release          Static Linux builds: x86_64, arm32, aarch64, riscv64"
+	@echo "tools/release-to-github  Build all four binaries; tag and upload a draft release"
 	@echo "make test             Config, update, restart, and sandboxed service lifecycle tests"
 	@echo "make test-browser     Served-UI login test (requires Playwright and Chromium; see README)"
 	@echo "make clean            Remove build artifacts"

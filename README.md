@@ -206,6 +206,20 @@ make VERSION=20260930130943 release
 Use the matching release tag, for example `v20260930130943`, when
 publishing those binaries.
 
+`tools/release-to-github` automates this. Commit everything first; it refuses
+to run with uncommitted build inputs. It builds all four binaries with
+one UTC timestamp, verifies the untouched source commit, pushes the
+annotated tag, and uploads a GitHub draft release:
+
+```sh
+tools/release-to-github [--publish]
+```
+
+Review the draft's generated notes, then publish it as latest. Use
+`--publish` to do both in one run. Supply `VERSION` to retry a failed
+run without generating another timestamp. Existing local or remote tags
+are never overwritten.
+
 
 ## Support
 

@@ -1,0 +1,130 @@
+#!/bin/sh
+# Build committed sources and upload a versioned GitHub release.
+
+fail()
+{
+    printf 'mergerfs-webui release: %s\n' "$*" >&2
+    exit 1
+}
+
+usage()
+{
+    cat <<'EOF'
+Usage: tools/release-to-github [--publish]
+
+Build all four Linux release binaries, create and push an annotated tag,
+and upload a GitHub draft release. --publish also publishes it as latest.
+
+Environment:
+  VERSION  UTC YYYYMMDDHHMMSS version (default: current UTC timestamp)
+  REMOTE   Git remote whose push URL selects the repository (default: origin)
+
+Requires git, make, Zig (see make zig-venv), and authenticated GitHub CLI.
+Tracked changes and untracked build inputs must be committed first.
+Existing local or remote tags are never overwritten.
+EOF
+}
+
+check_source()
+{
+    git diff --quiet && git diff --cached --quiet \
+        || fail 'Commit tracked changes before releasing.'
+    untracked=$(git ls-files --others -- \
+        'src/*.cpp' 'src/*.h' 'src/*.hpp' 'vendored/*.h' 'vendored/*.hpp' \
+        webui/index.html) || fail 'Could not inspect untracked build inputs.'
+    [ -z "$untracked" ] || fail "Commit untracked build inputs before releasing:
+$untracked"
+}
+
+main()
+{
+    set -eu
+    publish=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --publish) publish=1 ;;
+            --help|-h) usage; exit 0 ;;
+            *) fail "Unknown argument: $1 (use --help)." ;;
+        esac
+        shift
+    done
+
+    for tool in git make gh date dirname; do
+        command -v "$tool" >/dev/null 2>&1 || fail "Required command not found: $tool"
+    done
+    script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) \
+        || fail 'Could not locate the tools directory.'
+    root=$(git -C "$script_dir/.." rev-parse --show-toplevel) \
+        || fail 'The script must be inside the mergerfs-webui Git checkout.'
+    cd -- "$root"
+    check_source
+    commit=$(git rev-parse --verify HEAD) || fail 'No source commit is available.'
+
+    version=${VERSION:-$(date -u +%Y%m%d%H%M%S)}
+    case "$version" in
+        ''|*[!0-9]*) fail 'VERSION must be a 14-digit UTC YYYYMMDDHHMMSS timestamp.' ;;
+    esac
+    [ "${#version}" -eq 14 ] \
+        || fail 'VERSION must be a 14-digit UTC YYYYMMDDHHMMSS timestamp.'
+    tag=v$version
+    remote=${REMOTE:-origin}
+    url=$(git remote get-url --push "$remote") \
+        || fail "Could not find the push URL for remote $remote."
+    case "$url" in
+        https://github.com/*) repo=${url#https://github.com/} ;;
+        git@github.com:*) repo=${url#git@github.com:} ;;
+        ssh://git@github.com/*) repo=${url#ssh://git@github.com/} ;;
+        *) fail 'The selected push URL must be a github.com HTTPS or SSH URL.' ;;
+    esac
+    repo=${repo%/}
+    repo=${repo%.git}
+
+    if git show-ref --verify --quiet "refs/tags/$tag"; then
+        fail "Local tag $tag already exists; choose a new VERSION."
+    fi
+    gh auth status --hostname github.com \
+        || fail 'Authenticate first with gh auth login --hostname github.com.'
+    repo=$(gh repo view "$repo" --json nameWithOwner --jq .nameWithOwner) \
+        || fail 'Could not resolve the release repository.'
+    [ -n "$repo" ] || fail 'GitHub returned an empty repository name.'
+    if git ls-remote --exit-code --tags -- "$url" "refs/tags/$tag" >/dev/null; then
+        fail "Remote tag $tag already exists; choose a new VERSION."
+    else
+        status=$?
+        [ "$status" -eq 2 ] || fail 'Could not check remote release tags.'
+    fi
+
+    printf 'Building %s from %s for %s...\n' "$tag" "$commit" "$repo"
+    make "VERSION=$version" release || fail "Build failed; no tag was created. Retry with VERSION=$version."
+    check_source
+    [ "$(git rev-parse --verify HEAD)" = "$commit" ] \
+        || fail 'HEAD changed during the build; no tag was created.'
+
+    set -- build/mergerfs-webui_x86_64-linux-musl \
+        build/mergerfs-webui_arm-linux-musleabihf \
+        build/mergerfs-webui_aarch64-linux-musl \
+        build/mergerfs-webui_riscv64-linux-musl
+    for asset do
+        [ -s "$asset" ] && [ -x "$asset" ] \
+            || fail "Missing or non-executable release asset: $asset; no tag was created."
+    done
+
+    git tag -a "$tag" "$commit" -m "mergerfs-webui $tag" \
+        || fail "Could not create local tag $tag."
+    git push --no-follow-tags -- "$url" "refs/tags/$tag" \
+        || fail "Tag push failed; local tag $tag remains. No GitHub release was created."
+    gh release create "$tag" --repo "$repo" --verify-tag --draft \
+        --generate-notes --title "mergerfs-webui $tag" "$@" \
+        || fail "Release upload failed; tag $tag remains. Inspect any GitHub draft before retrying."
+
+    if [ "$publish" -eq 1 ]; then
+        gh release edit "$tag" --repo "$repo" --verify-tag --draft=false --latest \
+            || fail "Publication failed; inspect the draft for $tag."
+        printf 'Published %s as the latest release in %s.\n' "$tag" "$repo"
+    else
+        printf 'Uploaded draft %s in %s. Review its notes and four assets, then publish:\n' "$tag" "$repo"
+        printf '  gh release edit %s --repo %s --verify-tag --draft=false --latest\n' "$tag" "$repo"
+    fi
+}
+
+main "$@"
