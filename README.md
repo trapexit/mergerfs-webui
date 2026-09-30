@@ -155,60 +155,6 @@ garbage collection, and stripped symbols). `make release` uses Zig and
 `-Oz` for static cross-platform Linux binaries; run `make zig-venv`
 first if Zig is not installed.
 
-Both native modes write the same path; run `make clean` before
-switching modes so Make does not reuse the previous binary.
-
-The Makefile discovers `src/*.cpp` and source/vendored headers with
-globs.  Each source builds to its own object; compiler-generated `.d`
-files track the headers each object includes, including the generated
-page header. Objects for different Zig targets are kept in separate
-directories. Run `make test` for the existing test suite.
-
-The browser login regression test is separate from `make test` because
-it requires Python Playwright and a downloaded Chromium
-runtime. Install and run it explicitly (the local `.venv/` is ignored
-by Git):
-
-```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install 'playwright==1.63.0'
-.venv/bin/python -m playwright install chromium
-make test-browser PYTHON=.venv/bin/python
-```
-
-`make test-browser` starts a disposable password-protected server on
-loopback with temporary fstab and systemd-unit paths, serves
-`webui/index.html`, and checks that a wrong password leaves the login
-editable and authenticated actions disabled before a correct password
-verifies and enables them. It fails if Playwright or its Chromium
-runtime is missing; it does not silently skip. On systems lacking
-Chromium shared libraries, run `.venv/bin/python -m playwright
-install-deps chromium` (may require root) before retrying. The test
-does not perform privileged mount or service actions.
-
-`make clean` removes `build/`. `make distclean` also removes the
-project's default `.venv/` (used by Zig and optionally browser tests);
-it does not delete other untracked files.
-
-Check first-party C++ formatting with:
-
-```sh
-te-format format --check --lang cpp --exclude src/favicon_ico.h src tests
-```
-
-Use `--write` instead of `--check` to format. Do not reformat vendored
-code or the generated favicon header.
-
-In new mount-command code, declare locals at the start of each
-block. Assign runtime results immediately before they are needed,
-rather than mixing declarations into later execution steps; retain
-initialization at declaration when required by C++ construction,
-constness, or reference binding.
-
-Build API response bodies with `nlohmann::json` and `.dump()`, not
-handwritten serialized JSON strings. Python tests use `json.dumps`
-except when exercising malformed input or duplicate object keys.
-
 
 ## Support
 
