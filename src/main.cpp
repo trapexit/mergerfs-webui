@@ -1740,6 +1740,10 @@ _service_spec(const std::string    &host_,
 {
   struct stat      running;
   constexpr size_t default_systemd_directory_count = 2;
+  spec_->host          = host_;
+  spec_->port          = port_;
+  spec_->password_file = password_file_;
+  spec_->executable    = ServiceInstall::MANAGED_EXECUTABLE;
 
   if(::geteuid() != 0)
     {
@@ -1759,10 +1763,6 @@ _service_spec(const std::string    &host_,
                             "service setup or removal requires the embedded UI and default persistence paths");
     }
 
-  spec_->host          = host_;
-  spec_->port          = port_;
-  spec_->password_file = password_file_;
-  spec_->executable    = ServiceInstall::MANAGED_EXECUTABLE;
   if((::stat("/run/systemd/system",&running) < 0) ||
      (!S_ISDIR(running.st_mode)) ||
      (::access(SYSTEMCTL_PATH,X_OK) < 0))
@@ -2365,13 +2365,16 @@ _print_usage(std::ostream &out_)
     "Use --password-file to require authentication for these operations.\n" <<
     "Updates also require /usr/bin/curl, /usr/bin/sha256sum, and write access\n" <<
     "to the executable directory. Restart re-execs the installed binary.\n" <<
-    "Setup can stage the running binary under /usr/local/bin and install\n" <<
-    "a systemd system service when running as root. With no --password-file,\n" <<
-    "setup requires a localhost browser connection. Password protection is\n" <<
-    "optional: enable it in Setup to save a 32-character password in a\n" <<
-    "root-only file. With no password, anyone who can reach the listener can\n" <<
-    "change settings. The service keeps the current host and port; use TLS\n" <<
-    "before exposing the listener to a network.\n" <<
+    "Setup can copy the running binary to /usr/local/bin or use it in place,\n" <<
+    "and install a systemd system service when running as root.\n" <<
+    "Choose localhost (127.0.0.1), all IPv4 interfaces (0.0.0.0), or a custom\n" <<
+    "listener address, and any service port from 1 to 65535.\n" <<
+    "Choose no password, the current password file, or a new password of\n" <<
+    "1-128 printable ASCII characters without spaces or controls. Setup\n" <<
+    "generates an editable 32-character default; save it before closing the tab.\n" <<
+    "These choices are independent; security warnings do not restrict them.\n" <<
+    "With no password, anyone who can reach the listener can change settings.\n" <<
+    "Plain HTTP does not encrypt passwords; use SSH, TLS, or a VPN as needed.\n" <<
     "Setup can also remove the exact matching systemd unit and disable\n" <<
     "automatic startup. When run by that service, the web UI then exits;\n" <<
     "the installed executable, password file and mergerfs config remain.\n" <<
@@ -2565,11 +2568,12 @@ _log_http_request(const httplib::Request  &req_,
 }
 
 
-static constexpr char SERVICE_ENABLE_PASSWORD_FIELD[] = "enable_password";
 static constexpr char SERVICE_MODE_FIELD[] = "mode";
+static constexpr char SERVICE_HOST_FIELD[] = "host";
 static constexpr char SERVICE_PORT_FIELD[] = "port";
 static constexpr char SERVICE_EXECUTABLE_FIELD[] = "expected_executable";
-static constexpr char SERVICE_PASSWORD_FIELD[]   = "password";
+static constexpr char SERVICE_PASSWORD_MODE_FIELD[] = "password_mode";
+static constexpr char SERVICE_PASSWORD_FIELD[] = "password";
 
 
 static
@@ -2577,10 +2581,12 @@ bool
 _valid_service_install_payload(const json &body_)
 {
   return ((body_.is_object()) &&
-          (body_.contains(SERVICE_ENABLE_PASSWORD_FIELD)) &&
-          (body_[SERVICE_ENABLE_PASSWORD_FIELD].is_boolean()) &&
+          (body_.contains(SERVICE_PASSWORD_MODE_FIELD)) &&
+          (body_[SERVICE_PASSWORD_MODE_FIELD].is_string()) &&
           (body_.contains(SERVICE_MODE_FIELD)) &&
           (body_[SERVICE_MODE_FIELD].is_string()) &&
+          (body_.contains(SERVICE_HOST_FIELD)) &&
+          (body_[SERVICE_HOST_FIELD].is_string()) &&
           (body_.contains(SERVICE_PORT_FIELD)) &&
           (body_[SERVICE_PORT_FIELD].is_number_integer()) &&
           (body_[SERVICE_PORT_FIELD] >= 1) &&
@@ -2648,7 +2654,6 @@ main(int    argc_,
   std::atomic<bool> service_start_requested{false};
   std::atomic<bool> service_remove_requested{false};
   std::atomic<bool> service_stop_requested{false};
-  std::atomic<bool> managed_password_created{false};
   std::mutex service_mutex;
   const std::string service_path =
     std::string(ServiceInstall::UNIT_DIRECTORY) + "/" + ServiceInstall::UNIT_NAME;
@@ -2665,51 +2670,23 @@ main(int    argc_,
 
     ServiceInstall::Spec spec;
     std::string error;
-    int rv =
-      ((((password_file.empty()) && (!_local_service_request(req_)))) ?
-       UpdateIO::fail(&error,
-                      EACCES,
-                      "initial setup requires opening Setup at localhost on this machine") :
-       _service_spec(host,port,password_file,&spec,&error));
+    int rv = _service_spec(host,port,password_file,&spec,&error);
     std::string running_path;
     std::string running_error;
-    const int running_rv = ServiceInstall::trusted_running_executable(&running_path,&running_error);
+    const int running_rv = ServiceInstall::runnable_running_executable(&running_path,&running_error);
     bool installed = false;
     bool enabled   = false;
     bool active    = false;
-    bool password_retry   = false;
-    std::string unit_mode = "install";
-    const auto check_installed = [&](const std::string &credential_)
-    {
-      spec.password_file = credential_;
-      spec.executable    = ServiceInstall::MANAGED_EXECUTABLE;
-      int result = ServiceInstall::existing(spec,ServiceInstall::UNIT_DIRECTORY,&installed,&error);
-      if((result == -EEXIST) &&
-         (running_rv == 0) &&
-         (running_path != spec.executable))
-        {
-          spec.executable = running_path;
-          result = ServiceInstall::existing(spec,ServiceInstall::UNIT_DIRECTORY,&installed,&error);
-          if((result == 0) && (installed))
-            {
-              unit_mode = "running";
-              return result;
-            }
-
-          spec.executable = ServiceInstall::MANAGED_EXECUTABLE;
-        }
-
-      return result;
-    };
     if(rv == 0)
-      rv = check_installed(password_file);
-    if((rv == -EEXIST) &&
-       (password_file.empty()) &&
-       (managed_password_created.load()))
-      {
-        rv             = check_installed(ServiceInstall::MANAGED_PASSWORD);
-        password_retry = ((rv == 0) && (installed));
-      }
+      rv = ServiceInstall::inspect(ServiceInstall::UNIT_DIRECTORY,&spec,&installed,&error);
+    const bool password_retry = installed &&
+      spec.password_file == ServiceInstall::MANAGED_PASSWORD &&
+      password_file != ServiceInstall::MANAGED_PASSWORD;
+    const std::string &credential = installed ? spec.password_file : password_file;
+    const std::string password_mode = credential.empty() ? "none" :
+      credential == password_file ? "current" : "new";
+    const std::string unit_mode = spec.executable == ServiceInstall::MANAGED_EXECUTABLE ?
+      "install" : "running";
 
     if((rv == 0) && (installed))
       {
@@ -2730,7 +2707,10 @@ main(int    argc_,
                            {"bootstrap",password_file.empty()},
                            {"password_retry",password_retry},
                            {"path",service_path},
-                           {"port",port},
+                           {"host",installed ? spec.host : host},
+                           {"port",installed ? spec.port : port},
+                           {"password_file",password_file},
+                           {"password_mode",password_mode},
                            {
                              "executable",
                              (installed) ?
@@ -2756,14 +2736,6 @@ main(int    argc_,
         return;
       }
 
-    if((password_file.empty()) && (!_local_service_request(req_)))
-      {
-        _update_error(res_,
-                      -EACCES,
-                      "initial setup requires opening Setup at localhost on this machine");
-        return;
-      }
-
     std::lock_guard<std::mutex> lock(service_mutex);
     if((restart_requested.load()) ||
        (service_start_requested.load()) ||
@@ -2781,7 +2753,7 @@ main(int    argc_,
       }
     catch(const json::exception &)
       {
-        _update_error(res_,-EINVAL,"choose whether the new service requires a password");
+        _update_error(res_,-EINVAL,"choose the service binding, executable and password policy");
         return;
       }
 
@@ -2800,41 +2772,30 @@ main(int    argc_,
         return;
       }
 
-    const bool enable_password = body[SERVICE_ENABLE_PASSWORD_FIELD].get<bool>();
-    if(((enable_password) &&
-        ((body.size() != 5) ||
+    const std::string password_mode = body[SERVICE_PASSWORD_MODE_FIELD].get<std::string>();
+    if(((password_mode != "none") &&
+        (password_mode != "current") &&
+        (password_mode != "new")) ||
+       ((password_mode == "new") ?
+        ((body.size() != 6) ||
          (!body.contains(SERVICE_PASSWORD_FIELD)) ||
-         (!body[SERVICE_PASSWORD_FIELD].is_string()))) ||
-       ((!enable_password) &&
-        (body.size() != 4)))
+         (!body[SERVICE_PASSWORD_FIELD].is_string())) :
+        (body.size() != 5)))
       {
-        _update_error(res_,-EINVAL,"only an enabled password may be supplied for service setup");
+        _update_error(res_,-EINVAL,"choose none, current or new authentication; only new accepts a password");
         return;
       }
 
     const std::string *setup_password = nullptr;
-    if(enable_password)
+    if(password_mode == "new")
       {
-        if(!password_file.empty())
-          {
-            _update_error(res_,-EINVAL,"this service already uses your configured password file");
-            return;
-          }
-
         const std::string &secret = body[SERVICE_PASSWORD_FIELD].get_ref<const std::string&>();
-        const auto is_alphanumeric = [](unsigned char c_)
-        {
-          return (((c_ >= 'a') &&
-                   (c_ <= 'z')) ||
-                  ((c_ >= 'A') &&
-                   (c_ <= 'Z')) ||
-                  ((c_ >= '0') &&
-                   (c_ <= '9')));
-        };
-        if((secret.size() != 32) ||
-           (!std::all_of(secret.begin(),secret.end(),is_alphanumeric)))
+        const auto printable = [](unsigned char c_) { return c_ >= 33 && c_ <= 126; };
+        if((secret.empty()) ||
+           (secret.size() > 128) ||
+           (!std::all_of(secret.begin(),secret.end(),printable)))
           {
-            _update_error(res_,-EINVAL,"the optional password must be 32 letters or digits");
+            _update_error(res_,-EINVAL,"password must be 1 to 128 printable ASCII characters without spaces");
             return;
           }
 
@@ -2843,19 +2804,62 @@ main(int    argc_,
 
     ServiceInstall::Spec spec;
     std::string error;
-    int rv = _service_spec(host,port,password_file,&spec,&error);
-    if(setup_password)
-      spec.password_file = ServiceInstall::MANAGED_PASSWORD;
+    spec.host = body[SERVICE_HOST_FIELD].get<std::string>();
+    spec.port = body[SERVICE_PORT_FIELD].get<int>();
+    spec.executable = body[SERVICE_EXECUTABLE_FIELD].get<std::string>();
+    spec.password_file = password_mode == "none" ? "" :
+      password_mode == "current" ? password_file : ServiceInstall::MANAGED_PASSWORD;
+    int rv = ServiceInstall::validate_arguments(spec,&error);
+    ServiceInstall::Spec installed_spec;
+    bool installed = false;
+    int inspect_rv = 0;
+    if(rv == 0)
+      inspect_rv = ServiceInstall::inspect(ServiceInstall::UNIT_DIRECTORY,
+                                           &installed_spec,&installed,&error);
+    if((password_mode == "current") &&
+       ((installed ? installed_spec.password_file : password_file).empty()))
+      {
+        _update_error(res_,-EINVAL,"there is no existing password file to reuse");
+        return;
+      }
+
+    if((rv == 0) && (password_mode == "current") && installed)
+      spec.password_file = installed_spec.password_file;
+
+    if(rv == 0)
+      rv = _service_spec(spec.host,spec.port,spec.password_file,&spec,&error);
     if(rv < 0)
       {
         _update_error(res_,rv == -EEXIST ? -EALREADY : rv,error);
         return;
       }
 
-    spec.port = body[SERVICE_PORT_FIELD].get<int>();
+    if(inspect_rv < 0)
+      {
+        _update_error(res_,inspect_rv == -EEXIST ? -EALREADY : inspect_rv,error);
+        return;
+      }
+
+    if(installed && setup_password)
+      {
+        _update_error(res_,-EALREADY,"remove the installed unit before choosing a new password");
+        return;
+      }
+
+    if(installed &&
+       (mode != (installed_spec.executable == ServiceInstall::MANAGED_EXECUTABLE ?
+                 "install" : "running")))
+      {
+        _update_error(res_,-EALREADY,"remove the installed unit before changing executable mode");
+        return;
+      }
+
     if(mode == "running")
       {
-        rv = ServiceInstall::trusted_running_executable(&spec.executable,&error);
+        if(installed)
+          spec.executable = installed_spec.executable;
+        else
+          rv = ServiceInstall::runnable_running_executable(&spec.executable,&error);
         if(rv < 0)
           {
             _update_error(res_,rv,error);
@@ -2871,7 +2875,6 @@ main(int    argc_,
         return;
       }
 
-    bool installed = false;
     rv = ServiceInstall::existing(spec,ServiceInstall::UNIT_DIRECTORY,&installed,&error);
     if(rv < 0)
       {
@@ -2879,7 +2882,7 @@ main(int    argc_,
         return;
       }
 
-    if(mode == "install")
+    if((mode == "install") && (!installed))
       {
         bool staged = false;
         rv = ServiceInstall::stage_executable("/proc/self/exe",
@@ -2907,8 +2910,6 @@ main(int    argc_,
           }
       }
 
-    if(setup_password)
-      managed_password_created = true;
     const auto install_error = [&](int code_,const std::string &message_)
     {
       _update_error(res_,code_,message_);
@@ -2944,13 +2945,17 @@ main(int    argc_,
         return;
       }
 
+    const std::string destination_password_mode = spec.password_file.empty() ? "none" :
+      spec.password_file == password_file ? "current" : "new";
+
     std::string output;
     int active = _run_mount_command(SYSTEMCTL_PATH,
                                     {"is-active","--quiet","--",ServiceInstall::UNIT_NAME},
                                     &output);
     if(active == 0)
       {
-        json result = {{"result","active"},{"path",service_path},{"port",spec.port}};
+        json result = {{"result","active"},{"path",service_path},{"host",spec.host},
+                       {"port",spec.port},{"password_mode",destination_password_mode}};
         if(setup_password)
           {
             result["password"] = *setup_password;
@@ -2970,7 +2975,8 @@ main(int    argc_,
     service_start_requested = true;
     res_.status             = httplib::StatusCode::Accepted_202;
     res_.set_header("Connection","close");
-    json result = {{"result","starting"},{"path",service_path},{"port",spec.port}};
+    json result = {{"result","starting"},{"path",service_path},{"host",spec.host},
+                   {"port",spec.port},{"password_mode",destination_password_mode}};
     if(setup_password)
       {
         result["password"] = *setup_password;
@@ -2990,14 +2996,6 @@ main(int    argc_,
         res_.status = httplib::StatusCode::Unauthorized_401;
         res_.set_content(json({{"error",{{"msg","authentication required"}}}}).dump(),
                          "application/json");
-        return;
-      }
-
-    if((password_file.empty()) && (!_local_service_request(req_)))
-      {
-        _update_error(res_,
-                      -EACCES,
-                      "removing an unauthenticated service requires opening Setup at localhost");
         return;
       }
 
@@ -3027,31 +3025,7 @@ main(int    argc_,
       }
 
     bool installed = false;
-    const auto check_installed = [&](const std::string &credential_)
-    {
-      spec.password_file = credential_;
-      spec.executable    = ServiceInstall::MANAGED_EXECUTABLE;
-      int result = ServiceInstall::existing(spec,ServiceInstall::UNIT_DIRECTORY,&installed,&error);
-      if(result == -EEXIST)
-        {
-          std::string running_path;
-          std::string running_error;
-          if((ServiceInstall::trusted_running_executable(&running_path,&running_error) == 0) &&
-             (running_path != spec.executable))
-            {
-              spec.executable = running_path;
-              result = ServiceInstall::existing(spec,
-                                                ServiceInstall::UNIT_DIRECTORY,
-                                                &installed,
-                                                &error);
-            }
-        }
-
-      return result;
-    };
-    rv = check_installed(password_file);
-    if((rv == -EEXIST) && (password_file.empty()) && (managed_password_created.load()))
-      rv = check_installed(ServiceInstall::MANAGED_PASSWORD);
+    rv = ServiceInstall::inspect(ServiceInstall::UNIT_DIRECTORY,&spec,&installed,&error);
 
     if((rv < 0) || (!installed))
       {
@@ -3129,14 +3103,6 @@ main(int    argc_,
         return;
       }
 
-    if((password_file.empty()) && (!_local_service_request(req_)))
-      {
-        _update_error(res_,
-                      -EACCES,
-                      "stopping an unauthenticated service requires opening Setup at localhost");
-        return;
-      }
-
     std::lock_guard<std::mutex> lock(service_mutex);
     if((restart_requested.load()) ||
        (service_start_requested.load()) ||
@@ -3163,31 +3129,7 @@ main(int    argc_,
       }
 
     bool installed = false;
-    const auto check_installed = [&](const std::string &credential_)
-    {
-      spec.password_file = credential_;
-      spec.executable    = ServiceInstall::MANAGED_EXECUTABLE;
-      int result = ServiceInstall::existing(spec,ServiceInstall::UNIT_DIRECTORY,&installed,&error);
-      if(result == -EEXIST)
-        {
-          std::string running_path;
-          std::string running_error;
-          if((ServiceInstall::trusted_running_executable(&running_path,&running_error) == 0) &&
-             (running_path != spec.executable))
-            {
-              spec.executable = running_path;
-              result = ServiceInstall::existing(spec,
-                                                ServiceInstall::UNIT_DIRECTORY,
-                                                &installed,
-                                                &error);
-            }
-        }
-
-      return result;
-    };
-    rv = check_installed(password_file);
-    if((rv == -EEXIST) && (password_file.empty()) && (managed_password_created.load()))
-      rv = check_installed(ServiceInstall::MANAGED_PASSWORD);
+    rv = ServiceInstall::inspect(ServiceInstall::UNIT_DIRECTORY,&spec,&installed,&error);
     if((rv < 0) || (!installed))
       {
         _update_error(res_,

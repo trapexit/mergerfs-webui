@@ -101,9 +101,9 @@ password file:
 sudo /usr/local/bin/mergerfs-webui --password-file /etc/mergerfs-webui/password
 ```
 
-Create the file as root before starting the web UI. It must contain a
-strong, nonempty password on one line; keep it and its parent
-directory private (for example, file mode `0600` and directory mode
+Create the file before starting the web UI. It must contain a nonempty
+password on one line. A strong password and private, root-owned storage
+are recommended (for example, file mode `0600` and directory mode
 `0700`). Do not put the password in a shell command
 argument. Terminate HTTPS at the proxy, restrict who can reach it, and
 preserve the browser's `Host` and `Origin` headers so same-origin
@@ -127,23 +127,50 @@ settings. Every VPN peer can reach the login endpoint: restrict VPN
 membership and use a strong password.
 
 `--host 0.0.0.0` explicitly listens on every IPv4 interface, not just
-a VPN interface. Do not expose it without authentication. Direct plain
+a VPN interface. Without authentication, anyone who can reach the
+listener can use its write endpoints. Direct plain
 HTTP on a LAN or the Internet also exposes passwords to network
 observers; a firewall does not encrypt credentials. Use SSH, TLS, or a
 VPN instead.
 
 Running as root allows the application to manage system mount
 configuration and set up its systemd service. For automatic startup,
-open **Setup** then choose **Set up and start service**. The service
-uses the current host and port and, by default, installs the running
-executable at `/usr/local/bin/mergerfs-webui`. If you choose **Require
-password for this service**, save the generated password displayed
-during setup; it will not be shown again. Setup replaces an existing
-managed service password, so the old one stops working. This step
-requires a systemd-based Linux installation. An existing unit with an
-explicit `--host 0.0.0.0` remains network-facing after an upgrade:
-review its `ExecStart` rather than assuming the new default changes
-that unit.
+open **Setup**, choose the service options, then select **Set up and
+start service**:
+
+- **Listener:** localhost (`127.0.0.1`), all IPv4 interfaces
+  (`0.0.0.0`), or a custom host/IP address.
+- **Port:** any TCP port from `1` to `65535`.
+- **Executable:** copy the running version to
+  `/usr/local/bin/mergerfs-webui` (default), or use the currently running
+  executable without copying it.
+- **Authentication:** no password, reuse the current server's password
+  file, or use a new password. New passwords accept `1`–`128` printable
+  ASCII characters without spaces or controls; setup generates a
+  32-character default that you can edit.
+
+These choices are independent of the foreground server's configuration.
+All-interface access without a password and executable paths writable
+by non-root users are allowed; security warnings explain the risks but
+do not restrict those choices. Requests to the foreground server still
+require its configured password. Setup requires root, systemd, valid
+inputs, and safe installation destinations; it will not overwrite an
+unrelated unit.
+
+Save a new password before closing the tab. It is written during setup,
+even if starting the service later fails, and is not displayed on later
+visits. Starting an already installed service reuses its password file
+without regenerating it. Installed listener, port, executable, and
+authentication options are read from the unit and are read-only; remove
+the unit and set it up again to change them.
+
+The foreground server exits after handing over to the service. If the
+listener or port changes, setup shows the destination to open. Localhost
+means the **server's** computer, not a remote browser's computer; remote
+setup of a localhost service shows SSH-tunnel instructions instead of a
+misleading local link. Existing units keep their configured listener
+after an upgrade; an explicit `--host 0.0.0.0` remains network-facing
+until the unit is changed.
 
 The web UI's updater replaces the executable at its current location,
 including after the running file or its directory has been renamed.

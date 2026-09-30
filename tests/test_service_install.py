@@ -78,41 +78,41 @@ def assert_denied(response, code):
     assert isinstance(payload.get('error', {}).get('msg'), str), payload
 
 
-def install_body(enable_password, password=None, mode='install', port=8081):
-    payload = {'enable_password': enable_password, 'mode': mode, 'port': port,
-               'expected_executable': '/usr/local/bin/mergerfs-webui'}
+def install_body(password_mode='none', password=None, mode='install', port=8081,
+                 host='127.0.0.1'):
+    payload = {'password_mode': password_mode, 'mode': mode, 'host': host,
+               'port': port, 'expected_executable': '/usr/local/bin/mergerfs-webui'}
     if password is not None:
         payload['password'] = password
     return json.dumps(payload).encode()
 
 
 def invalid_install_bodies():
-    base = {'enable_password': False, 'mode': 'install', 'port': 8081,
-            'expected_executable': '/usr/local/bin/mergerfs-webui'}
+    base = json.loads(install_body())
     def invalid(**changes):
         return json.dumps({**base, **changes}).encode()
     return (
         b'', b'not json', json.dumps([]).encode(), json.dumps({}).encode(),
-        json.dumps({'enable_password': False, 'port': 8081,
-                    'expected_executable': base['expected_executable']}).encode(),
-        json.dumps({key: value for key, value in base.items() if key != 'port'}).encode(),
-        invalid(extra=1),
-        invalid(password='not allowed'),
-        invalid(enable_password=True),
-        invalid(enable_password=True, password='short'),
-        invalid(enable_password=True, password='A' * 33),
-        invalid(enable_password=True, password='A' * 31 + '!'),
-        invalid(enable_password='false'),
-        invalid(enable_password=True, password=123),
+        *(json.dumps({key: value for key, value in base.items() if key != field}).encode()
+          for field in base),
+        invalid(extra=1), invalid(password='not allowed'),
+        invalid(password_mode='current', password='not allowed'),
+        invalid(password_mode='new'),
+        invalid(password_mode='new', password=''),
+        invalid(password_mode='new', password='A' * 129),
+        invalid(password_mode='new', password='has space'),
+        invalid(password_mode='new', password='control\n'),
+        invalid(password_mode='new', password='non-ascii-é'),
+        invalid(password_mode='new', password=123),
+        invalid(password_mode='unknown'), invalid(password_mode=True),
         invalid(expected_executable=123),
-        invalid(mode='unknown'),
-        invalid(mode=123),
-        invalid(port=0),
-        invalid(port=65536),
-        invalid(port=-1),
-        invalid(port=1.5),
-        invalid(port='8081'),
-        invalid(port=True),
+        invalid(expected_executable='/tmp/injected\nExecStart=/bin/sh'),
+        invalid(mode='unknown'), invalid(mode=123),
+        invalid(host=123), invalid(host=''), invalid(host='x' * 2049),
+        invalid(host='localhost\n[Service]'), invalid(host='host name'),
+        invalid(host='$(command)'), invalid(host='host%name'),
+        invalid(port=0), invalid(port=65536), invalid(port=-1),
+        invalid(port=1.5), invalid(port='8081'), invalid(port=True),
     )
 
 
@@ -120,115 +120,70 @@ def verify(binary):
     with tempfile.TemporaryDirectory(prefix='mergerfs-service-test-') as directory:
         root = Path(directory)
         if os.geteuid() == 0:
-            root.chmod(0o755)  # Allow the unprivileged server to open its fixture.
+            root.chmod(0o755)
         installed = root / 'mergerfs-webui'
         shutil.copy2(binary, installed)
-        password_file = root / 'insecure-password'
+        password_file = root / 'existing-password'
         password_file.write_text('service-test-secret\n')
-        password_file.chmod(0o644)  # Intentionally insecure: never suitable for a service unit.
+        password_file.chmod(0o644)
         original_password = password_file.read_bytes()
         original_mode = password_file.stat().st_mode & 0o777
 
-        def unauthenticated(base, server):
-            assert request(base, 'GET', route='/auth')[1]['password_required'] is False
-            status, payload = request(base, 'GET', route='/service/status')
-            assert status == 200 and payload['bootstrap'] is True, (status, payload)
-            assert payload['available'] is False and isinstance(payload['reason'], str), payload
-            assert 'executable' in payload, payload
-            assert payload['running_available'] is False and payload['running_reason'], payload
-            assert payload['running_executable'] == str(installed), payload
-            assert payload['unit_mode'] == '', payload
-            assert payload['port'] == int(base.rsplit(':', 1)[1]), payload
-            for body in invalid_install_bodies():
-                assert_denied(request(base, 'POST', body=body), 400)
-            assert_denied(request(base, 'POST', body=install_body(False)), 403)
-            assert_denied(request(base, 'POST', body=install_body(False, port=1)), 403)
-            assert_denied(request(base, 'POST', body=install_body(False, port=65535)), 403)
-            assert_denied(request(base, 'POST',
-                                  body=install_body(True, 'A' * 32)), 403)
-            assert_denied(request(base, 'DELETE', route='/service', body=b'{}'), 400)
-            # The empty stop request passes parsing, but cannot manage systemd as non-root.
-            assert_denied(request(base, 'POST', route='/service/stop', body=b''), 403)
-            assert_denied(request(base, 'POST', route='/service/stop'), 403)
-            for body in (json.dumps({}).encode(), json.dumps([]).encode(),
-                         json.dumps(None).encode(), b' ',
-                         json.dumps({'unexpected': True}).encode()):
-                assert_denied(request(base, 'POST', route='/service/stop', body=body), 400)
-            assert_denied(request(base, 'POST', body=install_body(False, mode='running')), 403)
+        def check(base, server, authenticated=False):
+            token = 'service-test-secret' if authenticated else None
+            if authenticated:
+                for wrong in (None, 'wrong-password'):
+                    for method, route in (
+                            ('GET', '/service/status'), ('POST', '/service/install'),
+                            ('DELETE', '/service'), ('POST', '/service/stop')):
+                        assert_denied(request(base, method, wrong, route, body=b''), 401)
+            for source in ('127.0.0.1', '127.0.0.2'):
+                status, payload = request(base, 'GET', token, '/service/status', source=source)
+                assert status == 200, (status, payload)
+                assert payload['bootstrap'] is not authenticated, payload
+                assert payload['available'] is False, payload
+                assert payload['host'] == '127.0.0.1', payload
+                assert payload['port'] == int(base.rsplit(':', 1)[1]), payload
+                assert payload['password_mode'] == ('current' if authenticated else 'none')
+                assert payload['password_file'] == (str(password_file) if authenticated else '')
+                assert payload['running_available'] is True, payload
+                assert payload['running_executable'] == str(installed), payload
+                for body in invalid_install_bodies():
+                    assert_denied(request(base, 'POST', token, body=body, source=source), 400)
+                if not authenticated:
+                    assert_denied(request(base, 'POST', token,
+                                          body=install_body('current'), source=source), 400)
+                for host in ('127.0.0.1', '0.0.0.0', 'localhost', '::', 'webui.example'):
+                    for port in (1, 65535):
+                        assert_denied(request(base, 'POST', token,
+                                              body=install_body(host=host, port=port),
+                                              source=source), 403)
+                policies = [('none', None), ('new', '!'), ('new', '~' * 128)]
+                if authenticated:
+                    policies.append(('current', None))
+                for mode in ('install', 'running'):
+                    for policy, secret in policies:
+                        assert_denied(request(base, 'POST', token,
+                                              body=install_body(policy, secret, mode),
+                                              source=source), 403)
+                for method, route in (('DELETE', '/service'), ('POST', '/service/stop')):
+                    assert_denied(request(base, method, token, route, body=b'{}', source=source), 400)
+                    assert_denied(request(base, method, token, route, body=b'', source=source), 403)
+                # Proxy headers no longer impose a service-only localhost gate.
+                assert_denied(request(base, 'POST', token, body=b'not json', source=source,
+                                      extra_headers={'Forwarded': 'for=127.0.0.1'}), 400)
+                # Existing same-origin protections still apply to writes.
+                assert_denied(request(base, 'POST', token, body=install_body(), source=source,
+                                      extra_headers={'Origin': 'http://unrelated.invalid'}), 403)
             assert server.poll() is None
-            assert request(base, 'GET', route='/auth')[1]['password_required'] is False
+            assert request(base, 'GET', route='/auth')[1]['password_required'] is authenticated
 
-        serve(installed, [], unauthenticated)
-
-        # A source address in 127/8 is routed entirely over loopback, but only
-        # 127.0.0.1 is trusted for unauthenticated bootstrap.
-        def remote_bootstrap(base, server):
-            status, payload = request(base, 'GET', route='/service/status',
-                                      source='127.0.0.2')
-            assert status == 200 and payload['bootstrap'] is True, (status, payload)
-            assert payload['available'] is False, payload
-            assert 'opening Setup at localhost' in payload['reason'], payload
-
-            gates = (
-                ('POST', '/service/install', b'not json',
-                 'initial setup requires opening Setup at localhost on this machine'),
-                ('DELETE', '/service', b'{}',
-                 'removing an unauthenticated service requires opening Setup at localhost'),
-                ('POST', '/service/stop', b'{}',
-                 'stopping an unauthenticated service requires opening Setup at localhost'),
-            )
-            for method, route, invalid_body, reason in gates:
-                # If the gate is bypassed, each malformed body returns 400
-                # rather than reaching the unprivileged systemd checks.
-                status, payload = request(base, method, route=route,
-                                          body=invalid_body, source='127.0.0.2')
-                assert status == 403 and payload['error']['msg'] == reason, (status, payload)
-                for headers in ({'Host': f'untrusted.example:{base.rsplit(":", 1)[1]}'},
-                                {'X-Forwarded-For': '127.0.0.1'},
-                                {'Via': '1.1 proxy'},
-                                {'Forwarded': 'for=127.0.0.1'}):
-                    status, payload = request(base, method, route=route,
-                                              body=invalid_body, extra_headers=headers)
-                    assert status == 403 and payload['error']['msg'] == reason, (
-                        headers, status, payload)
-            assert server.poll() is None
-
-        serve(installed, [], remote_bootstrap)
-
-        def insecure_credential(base, server):
-            assert request(base, 'GET', route='/auth')[1]['password_required'] is True
-            for password in (None, 'wrong-password'):
-                assert_denied(request(base, 'GET', password, '/service/status'), 401)
-                assert_denied(request(base, 'POST', password, body=b''), 401)
-                assert_denied(request(base, 'DELETE', password, '/service', body=b''), 401)
-                assert_denied(request(base, 'POST', password, '/service/stop', body=b''), 401)
-            # Authentication takes precedence even over an unexpected POST body.
-            assert_denied(request(base, 'POST',
-                                  body=json.dumps({'unexpected': True}).encode()), 401)
-            assert_denied(request(base, 'POST', route='/service/stop',
-                                  body=json.dumps({'unexpected': True}).encode()), 401)
-            status, payload = request(base, 'GET', 'service-test-secret', '/service/status')
-            assert status == 200 and payload['bootstrap'] is False, (status, payload)
-            # The correct credential authenticates but cannot authorize an unsafe unit.
-            for body in invalid_install_bodies():
-                assert_denied(request(base, 'POST', 'service-test-secret', body=body), 400)
-            assert_denied(request(base, 'POST', 'service-test-secret',
-                                  body=install_body(True, 'A' * 32)), 400)
-            assert_denied(request(base, 'POST', 'service-test-secret',
-                                  body=install_body(False)), 403)
-            assert_denied(request(base, 'DELETE', 'service-test-secret', '/service', body=b''), 403)
-            assert_denied(request(base, 'POST', 'service-test-secret',
-                                  '/service/stop', body=b''), 403)
-            for body in (json.dumps({}).encode(), b'not json'):
-                assert_denied(request(base, 'POST', 'service-test-secret',
-                                      '/service/stop', body=body), 400)
-            assert server.poll() is None
-            assert_denied(request(base, 'GET', route='/service/status'), 401)
-
-        serve(installed, ['--password-file', str(password_file)], insecure_credential)
+        serve(installed, [], lambda base, server: check(base, server))
+        serve(installed, ['--password-file', str(password_file)],
+              lambda base, server: check(base, server, authenticated=True))
         assert password_file.read_bytes() == original_password
         assert password_file.stat().st_mode & 0o777 == original_mode
-        print('service API auth and unsafe-install guards: passed')
+        print('service binding, independent authentication and request guards: passed')
 
 
 def verify_unit_writer(driver):
@@ -287,6 +242,66 @@ def verify_unit_writer(driver):
                            arguments[5]])
         assert injection.returncode != 0 and not unit.exists()
         print('sandbox systemd unit creation, collision and input guards: passed')
+
+def verify_unit_inspection(driver):
+    with tempfile.TemporaryDirectory(prefix='mergerfs-unit-inspect-test-') as directory:
+        root = Path(directory)
+        units = root / 'units'
+        units.mkdir(mode=0o700)
+        unit = units / 'mergerfs-webui.service'
+        credential = root / 'existing-password'
+        credential.write_bytes(b'existing-secret\n')
+        executable = '/home/user/mergerfs-webui'
+
+        def run(*args):
+            return subprocess.run([str(driver), *map(str, args)],
+                                  capture_output=True, text=True, check=False)
+
+        assert run('inspect', units).stdout.strip() == 'absent'
+        # Bindings, ports and existing credentials must survive inspection even
+        # when they differ from the foreground server's configuration.
+        for host, port, password in (
+                ('0.0.0.0', 1, 'none'), ('127.0.0.1', 65535, credential),
+                ('::', 8081, '/etc/mergerfs-webui/password'),
+                ('webui.example', 8080, 'none')):
+            result = run(units, executable, host, password, port)
+            assert result.returncode == 0, result
+            inspected = run('inspect', units)
+            assert inspected.returncode == 0, inspected
+            assert inspected.stdout.rstrip('\n').split('\t') == [
+                executable, host, str(port), '' if password == 'none' else str(password)]
+            removed = run('remove-installed', units)
+            assert removed.returncode == 0 and not unit.exists(), removed
+            assert credential.read_bytes() == b'existing-secret\n'
+
+        assert run(units, executable, '0.0.0.0', credential, 8081).returncode == 0
+        original = unit.read_bytes()
+        for altered in (
+                original.replace(b'RestartSec=2s', b'RestartSec=3s'),
+                original.replace(b'--port 8081', b'--port 08081'),
+                original.replace(b'--port 8081', b'--port 65536'),
+                original.replace(b'--host 0.0.0.0', b'--host localhost --log'),
+                original + b'\n[Service]\nExecStart=/bin/sh\n',
+                b'unrelated unit\n', b'x' * 7000):
+            unit.write_bytes(altered)
+            for action in ('inspect', 'remove-installed'):
+                result = run(action, units)
+                assert result.returncode != 0, result
+                assert unit.read_bytes() == altered
+        unit.write_bytes(original)
+        unit.chmod(0o666)
+        assert run('inspect', units).returncode != 0
+        unit.chmod(0o644)
+        linked = root / 'linked-unit'
+        os.link(unit, linked)
+        assert run('inspect', units).returncode != 0
+        linked.unlink()
+        unit.unlink()
+        unit.symlink_to(credential)
+        assert run('inspect', units).returncode != 0
+        assert credential.read_bytes() == b'existing-secret\n'
+        print('sandbox installed configuration discovery and collision safeguards: passed')
+
 
 def verify_unit_removal(driver):
     with tempfile.TemporaryDirectory(prefix='mergerfs-unit-remove-test-') as directory:
@@ -469,9 +484,20 @@ def verify_install_files(driver):
         destination.unlink()
         linked.unlink()
         source.chmod(0o777)
-        untrusted = subprocess.run([str(source), 'trust-running'],
-                                   capture_output=True, text=True, check=False)
-        assert untrusted.returncode != 0 and 'root-owned regular files' in untrusted.stderr, untrusted
+        runnable = subprocess.run([str(source), 'runnable-running'],
+                                  capture_output=True, text=True, check=False)
+        assert runnable.returncode == 0 and runnable.stdout.strip() == str(source), runnable
+        if os.geteuid() == 0:
+            # Reusing an existing credential is independent of atomic managed
+            # destination ownership policies.
+            current = root / 'current-password'
+            current.write_bytes(b'existing-secret\n')
+            current.chmod(0o666)
+            nobody = pwd.getpwnam('nobody')
+            os.chown(current, nobody.pw_uid, nobody.pw_gid)
+            os.chown(source, nobody.pw_uid, nobody.pw_gid)
+            success('validate', source, current, expected='valid')
+            success('validate', source, 'none', expected='valid')
 
         credentials = root / 'credentials'
         secret = 'A' * 32
@@ -491,6 +517,13 @@ def verify_install_files(driver):
         assert password.stat().st_mode & 0o7777 == 0o600
         assert list(credentials.iterdir()) == [password]
         success('password', credentials, changed_secret, expected='unchanged')
+        for valid in ('!', '~' * 128, 'punctuation-_$%\\\"'):
+            success('password', credentials, valid)
+            assert password.read_bytes() == valid.encode() + b'\n'
+        for invalid in ('', 'A' * 129, 'has space', 'control\n', 'é'):
+            before = password.read_bytes()
+            denied('password', credentials, invalid)
+            assert password.read_bytes() == before
         original = password.read_bytes()
 
         password.unlink()
@@ -513,13 +546,14 @@ def verify_install_files(driver):
         credential_link.symlink_to(credentials, target_is_directory=True)
         denied('password', credential_link, secret)
         assert not password.exists()
-        print('sandbox executable and credential trust boundaries: passed')
+        print('sandbox executable and credential destination safeguards: passed')
 
 
 if __name__ == '__main__':
     binary = Path(sys.argv[1] if len(sys.argv) > 1 else 'build/mergerfs-webui').resolve()
     driver = Path(sys.argv[2] if len(sys.argv) > 2 else 'build/test-service-install').resolve()
     verify(binary)
+    verify_unit_inspection(driver)
     verify_unit_writer(driver)
     verify_unit_removal(driver)
     verify_install_files(driver)

@@ -20,9 +20,11 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <charconv>
 #include <cstdio>
 #include <cstring>
 #include <string_view>
+#include <utility>
 #include <fcntl.h>
 #include <linux/fs.h>
 #include <sys/random.h>
@@ -151,6 +153,46 @@ namespace ServiceInstall
     }
 
 
+    bool
+    parse_unit(const std::string &text_,
+               Spec              *spec_)
+    {
+      constexpr std::string_view marker = "\nExecStart=";
+      const size_t start = text_.find(marker);
+      if(start == std::string::npos)
+        return false;
+      const size_t line = start + marker.size();
+      const size_t end = text_.find('\n',line);
+      if(end == std::string::npos)
+        return false;
+      const std::string_view command(text_.data() + line,end - line);
+      const size_t host = command.find(" --host ");
+      const size_t port = command.find(" --port ");
+      if((host == std::string_view::npos) ||
+         (port == std::string_view::npos) ||
+         (port <= host + 8))
+        return false;
+      const size_t password = command.find(" --password-file ",port + 8);
+      const size_t port_end = password == std::string_view::npos ? command.size() : password;
+      Spec parsed;
+      parsed.executable.assign(command.substr(0,host));
+      parsed.host.assign(command.substr(host + 8,port - host - 8));
+      const auto converted = std::from_chars(command.data() + port + 8,
+                                              command.data() + port_end,
+                                              parsed.port);
+      if((converted.ec != std::errc()) ||
+         (converted.ptr != command.data() + port_end))
+        return false;
+      if(password != std::string_view::npos)
+        parsed.password_file.assign(command.substr(password + 17));
+      std::string error;
+      if((check_spec(parsed,&error) != 0) || (unit_text(parsed) != text_))
+        return false;
+      *spec_ = std::move(parsed);
+      return true;
+    }
+
+
     int
     open_unit_directory(const std::string &directory_,
                         UpdateIO::FD      *fd_,
@@ -180,7 +222,8 @@ namespace ServiceInstall
                   bool              *installed_,
                   std::string       *error_,
                   UpdateIO::FD      *held_ = nullptr,
-                  struct stat       *metadata_ = nullptr)
+                  struct stat       *metadata_ = nullptr,
+                  Spec              *parsed_ = nullptr)
     {
       struct stat st;
       size_t      offset;
@@ -208,14 +251,16 @@ namespace ServiceInstall
          (st.st_uid != ::geteuid()) ||
          (st.st_mode & UNTRUSTED_WRITE_BITS) ||
          (st.st_nlink != 1) ||
-         (st.st_size != static_cast<off_t>(expected_.size())))
+         (st.st_size <= 0) ||
+         (st.st_size > static_cast<off_t>((MAX_ARGUMENT_LENGTH * 3) + UNIT_TEXT_RESERVE_OVERHEAD)) ||
+         ((!parsed_) && (st.st_size != static_cast<off_t>(expected_.size()))))
         {
           return UpdateIO::fail(error_,
                                 EEXIST,
                                 "existing mergerfs-webui service unit is not the requested unit");
         }
 
-      contents.assign(expected_.size(),'\0');
+      contents.assign(static_cast<size_t>(st.st_size),'\0');
       offset = 0;
       while(offset < contents.size())
         {
@@ -233,7 +278,7 @@ namespace ServiceInstall
           offset += static_cast<size_t>(count);
         }
 
-      if(contents != expected_)
+      if(parsed_ ? !parse_unit(contents,parsed_) : contents != expected_)
         {
           return UpdateIO::fail(error_,
                                 EEXIST,
@@ -254,60 +299,25 @@ namespace ServiceInstall
 
 
     int
-    trusted_file(const std::string &path_,
+    regular_file(const std::string &path_,
                  bool               executable_,
                  std::string       *error_)
     {
-      size_t start;
-      UpdateIO::FD dir(::open("/",O_RDONLY|O_DIRECTORY|O_CLOEXEC));
-      if(dir.value < 0)
-        return UpdateIO::fail(error_,errno,"cannot open root directory");
-      start = 1;
-      while(start < path_.size())
+      UpdateIO::FD file(::open(path_.c_str(),O_RDONLY|O_NONBLOCK|O_CLOEXEC));
+      if(file.value < 0)
+        return UpdateIO::fail(error_,errno,"cannot open service path: " + path_);
+      struct stat st;
+      if(::fstat(file.value,&st) < 0)
+        return UpdateIO::fail(error_,errno,"cannot inspect service path: " + path_);
+      if((!S_ISREG(st.st_mode)) ||
+         ((executable_) &&
+          ((!(st.st_mode & EXECUTE_BITS)) ||
+           (::faccessat(AT_FDCWD,path_.c_str(),X_OK,AT_EACCESS) < 0))))
         {
-          size_t end;
-          bool   last;
-          char   component[MAX_ARGUMENT_LENGTH + 1];
-          struct stat  st;
-          UpdateIO::FD next;
-          end = path_.find('/',start);
-          if(end == std::string::npos)
-            end = path_.size();
-          last = end == path_.size();
-          std::memcpy(component,path_.data() + start,end - start);
-          component[end - start] = '\0';
-          next.value = ::openat(dir.value,
-                                component,
-                                (last ? O_RDONLY | O_NONBLOCK : O_RDONLY | O_DIRECTORY) |
-                                O_NOFOLLOW | O_CLOEXEC);
-          if(next.value < 0)
-            return UpdateIO::fail(error_,errno,"cannot open trusted service path: " + path_);
-          if(::fstat(next.value,&st) < 0)
-            return UpdateIO::fail(error_,errno,"cannot inspect trusted service path: " + path_);
-          if((st.st_uid != 0) ||
-             (st.st_mode & UNTRUSTED_WRITE_BITS) ||
-             ((last) ?
-              ((!S_ISREG(st.st_mode)) ||
-               ((executable_) ?
-                ((st.st_nlink != 1) || (!(st.st_mode & EXECUTE_BITS))) :
-                (st.st_mode & NON_OWNER_ACCESS_BITS) != 0)) :
-              !S_ISDIR(st.st_mode)))
-            {
-              return UpdateIO::fail(error_,
-                                    EACCES,
-                                    "service executable and password file must be root-owned regular files in root-controlled directories: " +
-                                    path_);
-            }
-
-          // A staged executable is a trusted copy of the running binary, not its inode.
-          if(!last)
-            {
-              ::close(dir.value);
-              dir.value  = next.value;
-              next.value = UpdateIO::FD::invalid_fd;
-            }
-
-          start = end + 1;
+          return UpdateIO::fail(error_,
+                                EACCES,
+                                "service path must be a regular readable file and executables must be runnable: " +
+                                path_);
         }
 
       return 0;
@@ -432,8 +442,8 @@ namespace ServiceInstall
 
 
   int
-  trusted_running_executable(std::string *path_,
-                             std::string *error_)
+  runnable_running_executable(std::string *path_,
+                              std::string *error_)
   {
     int rc;
     struct stat  current_stat;
@@ -450,7 +460,7 @@ namespace ServiceInstall
                               "running executable has no safe on-disk path; restart it before using it for a service");
       }
 
-    rc = trusted_file(*path_,true,error_);
+    rc = regular_file(*path_,true,error_);
     if(rc)
       return rc;
     current.value = ::open(path_->c_str(),O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
@@ -764,6 +774,14 @@ namespace ServiceInstall
 
 
   int
+  validate_arguments(const Spec &spec_,
+                     std::string *error_)
+  {
+    return check_spec(spec_,error_);
+  }
+
+
+  int
   validate(const Spec  &spec_,
            std::string *error_)
   {
@@ -778,10 +796,25 @@ namespace ServiceInstall
     rc = check_spec(spec_,error_);
     if(rc)
       return rc;
-    rc = trusted_file(spec_.executable,true,error_);
+    rc = regular_file(spec_.executable,true,error_);
     if(rc)
       return rc;
-    return spec_.password_file.empty() ? 0 : trusted_file(spec_.password_file,false,error_);
+    return spec_.password_file.empty() ? 0 : regular_file(spec_.password_file,false,error_);
+  }
+
+
+  int
+  inspect(const std::string &directory_,
+          Spec              *spec_,
+          bool              *installed_,
+          std::string       *error_)
+  {
+    UpdateIO::FD dir;
+    *installed_ = false;
+    const int rc = open_unit_directory(directory_,&dir,error_);
+    if(rc)
+      return rc;
+    return read_existing(dir.value,"",installed_,error_,nullptr,nullptr,spec_);
   }
 
 

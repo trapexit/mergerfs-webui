@@ -40,11 +40,11 @@ namespace ServiceInstall
   running_executable(std::string *path,
                      std::string *error);
 
-  // Direct service execution requires this exact inode in root-controlled storage.
+  // Require a safe, runnable on-disk path matching the running inode.
 
   int
-  trusted_running_executable(std::string *path,
-                             std::string *error);
+  runnable_running_executable(std::string *path,
+                              std::string *error);
 
   // Install a fresh inode atomically; replace only a safe regular destination.
 
@@ -61,9 +61,24 @@ namespace ServiceInstall
                   const std::string &secret,
                   bool              *created,
                   std::string       *error);
+
+  // Validate unit arguments without requiring root or accessing the filesystem.
+
+  int
+  validate_arguments(const Spec &spec,
+                     std::string *error);
+
   int
   validate(const Spec  &spec,
            std::string *error);
+
+  // Read only an installer-owned, canonical generated unit; reject collisions.
+
+  int
+  inspect(const std::string &directory,
+          Spec              *spec,
+          bool              *installed,
+          std::string       *error);
 
   // Returns EEXIST for a unit with different content, including a symlink.
 

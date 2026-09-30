@@ -17,6 +17,7 @@
 #include "service_install.hpp"
 
 #include <cstring>
+#include <charconv>
 #include <iostream>
 
 
@@ -24,11 +25,11 @@ int
 main(int    argc_,
      char **argv_)
 {
-  if((argc_ == 2) && (std::strcmp(argv_[1],"trust-running") == 0))
+  if((argc_ == 2) && (std::strcmp(argv_[1],"runnable-running") == 0))
     {
       std::string path;
       std::string error;
-      if(ServiceInstall::trusted_running_executable(&path,&error) != 0)
+      if(ServiceInstall::runnable_running_executable(&path,&error) != 0)
         {
           std::cerr << error << '\n';
           return 1;
@@ -66,6 +67,45 @@ main(int    argc_,
       return 0;
     }
 
+  if((argc_ == 4) && (std::strcmp(argv_[1],"validate") == 0))
+    {
+      ServiceInstall::Spec spec{argv_[2],"0.0.0.0",8080,
+                               std::strcmp(argv_[3],"none") == 0 ? "" : argv_[3]};
+      std::string error;
+      if(ServiceInstall::validate(spec,&error) != 0)
+        {
+          std::cerr << error << '\n';
+          return 1;
+        }
+
+      std::cout << "valid\n";
+      return 0;
+    }
+
+  if((argc_ == 3) &&
+     ((std::strcmp(argv_[1],"inspect") == 0) ||
+      (std::strcmp(argv_[1],"remove-installed") == 0)))
+    {
+      ServiceInstall::Spec spec;
+      bool installed = false;
+      std::string error;
+      int rv = ServiceInstall::inspect(argv_[2],&spec,&installed,&error);
+      if((rv == 0) && installed && (std::strcmp(argv_[1],"remove-installed") == 0))
+        rv = ServiceInstall::remove_unit(spec,argv_[2],&error);
+      if(rv < 0)
+        {
+          std::cerr << rv << ": " << error << '\n';
+          return 1;
+        }
+
+      if(!installed)
+        std::cout << "absent\n";
+      else
+        std::cout << spec.executable << '\t' << spec.host << '\t'
+                  << spec.port << '\t' << spec.password_file << '\n';
+      return 0;
+    }
+
   if((argc_ == 7) && (std::strcmp(argv_[1],"remove") == 0))
     {
       ServiceInstall::Spec spec{argv_[3],argv_[4],8080,std::strcmp(argv_[5],"none") == 0 ? "" : argv_[5]};
@@ -88,6 +128,13 @@ main(int    argc_,
   ServiceInstall::Spec spec{argv_[2],argv_[3],8080,std::strcmp(argv_[4],"none") == 0 ? "" : argv_[4]};
   if(std::strcmp(argv_[5],"other-port") == 0)
     spec.port = 8081;
+  else if(std::strcmp(argv_[5],"default") != 0)
+    {
+      const char *end = argv_[5] + std::strlen(argv_[5]);
+      const auto parsed = std::from_chars(argv_[5],end,spec.port);
+      if((parsed.ec != std::errc()) || (parsed.ptr != end))
+        return 2;
+    }
   bool created = false;
   std::string error;
   int rv = ServiceInstall::write_unit(spec,argv_[1],&created,&error);
