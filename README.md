@@ -160,9 +160,16 @@ unrelated unit.
 Save a new password before closing the tab. It is written during setup,
 even if starting the service later fails, and is not displayed on later
 visits. Starting an already installed service reuses its password file
-without regenerating it. Installed listener, port, executable, and
-authentication options are read from the unit and are read-only; remove
-the unit and set it up again to change them.
+without regenerating it.
+
+Installed listener, port, and authentication options can be changed in
+place: adjust them in Setup and select **Apply changes and restart
+service**. The unit file is replaced atomically, systemd reloads it, and
+the service restarts with the new settings; when this web UI is running
+as that service, it briefly disconnects and systemd restarts it. A new
+password rotates the managed password file. The executable and its
+installation mode remain fixed; remove the unit and set it up again to
+change them.
 
 The foreground server exits after handing over to the service. If the
 listener or port changes, setup shows the destination to open. Localhost

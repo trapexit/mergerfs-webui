@@ -2375,6 +2375,8 @@ _print_usage(std::ostream &out_)
     "These choices are independent; security warnings do not restrict them.\n" <<
     "With no password, anyone who can reach the listener can change settings.\n" <<
     "Plain HTTP does not encrypt passwords; use SSH, TLS, or a VPN as needed.\n" <<
+    "Installed listener, port, and authentication options can be changed in\n" <<
+    "place and the service restarted; the executable mode stays fixed.\n" <<
     "Setup can also remove the exact matching systemd unit and disable\n" <<
     "automatic startup. When run by that service, the web UI then exits;\n" <<
     "the installed executable, password file and mergerfs config remain.\n" <<
@@ -2654,6 +2656,7 @@ main(int    argc_,
   std::atomic<bool> service_start_requested{false};
   std::atomic<bool> service_remove_requested{false};
   std::atomic<bool> service_stop_requested{false};
+  std::atomic<bool> service_update_requested{false};
   std::mutex service_mutex;
   const std::string service_path =
     std::string(ServiceInstall::UNIT_DIRECTORY) + "/" + ServiceInstall::UNIT_NAME;
@@ -2988,6 +2991,282 @@ main(int    argc_,
     http_server.stop();
   };
   http_server.Post("/service/install",service_install);
+  const auto service_update = [&](const httplib::Request &req_,
+                                  httplib::Response      &res_)
+  {
+    if(!_check_auth(req_))
+      {
+        res_.status = httplib::StatusCode::Unauthorized_401;
+        res_.set_content(json({{"error",{{"msg","authentication required"}}}}).dump(),
+                         "application/json");
+        return;
+      }
+
+    std::lock_guard<std::mutex> lock(service_mutex);
+    if((restart_requested.load()) ||
+       (service_start_requested.load()) ||
+       (service_remove_requested.load()) ||
+       (service_stop_requested.load()) ||
+       (service_update_requested.load()))
+      {
+        _update_error(res_,-EALREADY,"a service transition is already in progress");
+        return;
+      }
+
+    json body;
+    try
+      {
+        body = json::parse(req_.body);
+      }
+    catch(const json::exception &)
+      {
+        _update_error(res_,-EINVAL,"choose the service binding, executable and password policy");
+        return;
+      }
+
+    // Update shares install's option validation and executable expectations.
+    if(!_valid_service_install_payload(body))
+      {
+        _update_error(res_,
+                      -EINVAL,
+                      "choose a service executable mode, port from 1 to 65535, and password policy");
+        return;
+      }
+
+    const std::string mode = body[SERVICE_MODE_FIELD].get<std::string>();
+    if((mode != "install") && (mode != "running"))
+      {
+        _update_error(res_,-EINVAL,"service executable mode must be install or running");
+        return;
+      }
+
+    const std::string password_mode = body[SERVICE_PASSWORD_MODE_FIELD].get<std::string>();
+    if(((password_mode != "none") &&
+        (password_mode != "current") &&
+        (password_mode != "new")) ||
+       ((password_mode == "new") ?
+        ((body.size() != 6) ||
+         (!body.contains(SERVICE_PASSWORD_FIELD)) ||
+         (!body[SERVICE_PASSWORD_FIELD].is_string())) :
+        (body.size() != 5)))
+      {
+        _update_error(res_,-EINVAL,"choose none, current or new authentication; only new accepts a password");
+        return;
+      }
+
+    const std::string *setup_password = nullptr;
+    if(password_mode == "new")
+      {
+        const std::string &secret = body[SERVICE_PASSWORD_FIELD].get_ref<const std::string&>();
+        const auto printable = [](unsigned char c_) { return c_ >= 33 && c_ <= 126; };
+        if((secret.empty()) ||
+           (secret.size() > 128) ||
+           (!std::all_of(secret.begin(),secret.end(),printable)))
+          {
+            _update_error(res_,-EINVAL,"password must be 1 to 128 printable ASCII characters without spaces");
+            return;
+          }
+
+        setup_password = &secret;
+      }
+
+    if((password_mode == "current") && (password_file.empty()))
+      {
+        _update_error(res_,-EINVAL,"this server has no password file to reuse");
+        return;
+      }
+
+    // Validate the requested options before any privilege or state checks so
+    // unsafe arguments are always rejected with the same status as setup.
+    ServiceInstall::Spec spec;
+    spec.executable    = body[SERVICE_EXECUTABLE_FIELD].get<std::string>();
+    spec.host          = body[SERVICE_HOST_FIELD].get<std::string>();
+    spec.port          = body[SERVICE_PORT_FIELD].get<int>();
+    spec.password_file = password_mode == "none" ? "" :
+      password_mode == "current" ? password_file : ServiceInstall::MANAGED_PASSWORD;
+    std::string error;
+    int rv = ServiceInstall::validate_arguments(spec,&error);
+    if(rv < 0)
+      {
+        _update_error(res_,rv,error);
+        return;
+      }
+
+    if(::geteuid() != 0)
+      {
+        _update_error(res_,-EACCES,"updating a system service requires running mergerfs-webui as root");
+        return;
+      }
+
+    ServiceInstall::Spec installed_spec;
+    bool installed = false;
+    rv = ServiceInstall::inspect(ServiceInstall::UNIT_DIRECTORY,
+                                 &installed_spec,&installed,&error);
+    if(rv < 0)
+      {
+        _update_error(res_,rv == -EEXIST ? -EALREADY : rv,error);
+        return;
+      }
+    if(!installed)
+      {
+        _update_error(res_,-ENOENT,"no mergerfs-webui service is installed; use setup first");
+        return;
+      }
+
+    const std::string installed_mode = installed_spec.executable == ServiceInstall::MANAGED_EXECUTABLE ?
+      "install" : "running";
+    if(mode != installed_mode)
+      {
+        _update_error(res_,
+                      -EALREADY,
+                      std::string("installed executable mode is ") + installed_mode +
+                      "; remove the unit to change it");
+        return;
+      }
+
+    if(spec.executable != installed_spec.executable)
+      {
+        _update_error(res_,
+                      -EALREADY,
+                      "service executable changed; refresh Setup and confirm again");
+        return;
+      }
+
+    // The request matches the installed executable; keep it exactly.
+    spec.executable = installed_spec.executable;
+
+    pid_t main_pid = 0;
+    rv = _service_main_pid(service_path,&main_pid,&error);
+    if(rv < 0)
+      {
+        _update_error(res_,rv,error);
+        return;
+      }
+
+    // Detect what actually changes: the unit text, the managed secret, or both.
+    const bool unit_text_changed = spec.host != installed_spec.host ||
+                                   spec.port != installed_spec.port ||
+                                   spec.password_file != installed_spec.password_file;
+    const bool secret_change = setup_password != nullptr;
+    bool replaced = false;
+    if(!unit_text_changed && !secret_change)
+      {
+        _update_error(res_,-EALREADY,"the installed service already uses those options");
+        return;
+      }
+
+    rv = ServiceInstall::validate_arguments(spec,&error);
+    if(rv < 0)
+      {
+        _update_error(res_,rv,error);
+        return;
+      }
+
+    // Write a new credential before touching the unit, mirroring setup: the
+    // unit then always references a credential that exists, and a failed
+    // unit replace leaves the previous unit on its previous credential.
+    if(secret_change)
+      {
+        rv = ServiceInstall::replace_password(ServiceInstall::MANAGED_PASSWORD_DIRECTORY,
+                                              *setup_password,&error);
+        if(rv == -ENOENT)
+          {
+            bool created_password = false;
+            rv = ServiceInstall::create_password(ServiceInstall::MANAGED_PASSWORD_DIRECTORY,
+                                                 *setup_password,&created_password,&error);
+          }
+        if(rv < 0)
+          {
+            _update_error(res_,rv,"the new password was not saved: " + error);
+            return;
+          }
+      }
+
+    if(unit_text_changed)
+      {
+        rv = ServiceInstall::validate(spec,&error);
+        if(rv < 0)
+          {
+            _update_error(res_,
+                          rv,
+                          std::string(secret_change ?
+                                      "password saved, but the service was not updated: " :
+                                      "") + error);
+            return;
+          }
+
+        // replace_unit proves the on-disk unit still matches the installed
+        // options validated above, refuses a no-op, and swaps atomically.
+        // Do not pre-check with existing(): it reports EEXIST whenever the
+        // requested unit differs from disk, which is the normal update case.
+        rv = ServiceInstall::replace_unit(installed_spec,spec,ServiceInstall::UNIT_DIRECTORY,
+                                         &replaced,&error);
+        if(rv < 0)
+          {
+            _update_error(res_,
+                          rv,
+                          std::string(secret_change ?
+                                      "password saved, but the service unit was not updated: " :
+                                      "") + error);
+            return;
+          }
+      }
+
+    rv = _service_command({"daemon-reload"},&error);
+    if(rv < 0)
+      {
+        _update_error(res_,rv,"unit replaced, but systemd could not reload: " + error);
+        return;
+      }
+
+    const std::string destination_password_mode = spec.password_file.empty() ? "none" :
+      spec.password_file == password_file ? "current" : "new";
+
+    if(main_pid == ::getpid())
+      {
+        // The service restarts itself by exiting with a failure so
+        // Restart=on-failure respawns it with the replaced unit.
+        service_update_requested = true;
+        res_.status = httplib::StatusCode::Accepted_202;
+        res_.set_header("Connection","close");
+        json result = {{"result","restarting"},
+                       {"path",service_path},
+                       {"host",spec.host},
+                       {"port",spec.port},
+                       {"password_mode",destination_password_mode}};
+        if(setup_password)
+          {
+            result["password"] = *setup_password;
+            res_.set_header("Cache-Control","no-store");
+          }
+
+        res_.set_content(result.dump(),"application/json");
+        http_server.stop();
+        return;
+      }
+
+    rv = _service_command({"restart","--",ServiceInstall::UNIT_NAME},&error);
+    if(rv < 0)
+      {
+        _update_error(res_,rv,"unit updated, but systemd could not restart: " + error);
+        return;
+      }
+
+    res_.status = httplib::StatusCode::OK_200;
+    json result = {{"result","restarted"},
+                   {"path",service_path},
+                   {"host",spec.host},
+                   {"port",spec.port},
+                   {"password_mode",destination_password_mode}};
+    if(setup_password)
+      {
+        result["password"] = *setup_password;
+        res_.set_header("Cache-Control","no-store");
+      }
+
+    res_.set_content(result.dump(),"application/json");
+  };
+  http_server.Post("/service/update",service_update);
   const auto service_remove = [&](const httplib::Request &req_,
                                   httplib::Response      &res_)
   {
@@ -3253,6 +3532,15 @@ main(int    argc_,
       if(!http_server.listen(host,port))
         {
           std::cerr << "Failed to bind/listen on " << host << ':' << port << '\n';
+          return EXIT_FAILURE;
+        }
+
+      if(service_update_requested.load())
+        {
+          // Clean exit would not restart Restart=on-failure service units, so
+          // exit with a failure to make systemd restart this service using the
+          // unit file just replaced by /service/update.
+          std::cerr << "Web UI service updated; exiting so systemd applies Restart=on-failure\n";
           return EXIT_FAILURE;
         }
 

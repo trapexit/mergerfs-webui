@@ -135,6 +135,7 @@ def verify(binary):
                 for wrong in (None, 'wrong-password'):
                     for method, route in (
                             ('GET', '/service/status'), ('POST', '/service/install'),
+                            ('POST', '/service/update'),
                             ('DELETE', '/service'), ('POST', '/service/stop')):
                         assert_denied(request(base, method, wrong, route, body=b''), 401)
             for source in ('127.0.0.1', '127.0.0.2'):
@@ -150,8 +151,13 @@ def verify(binary):
                 assert payload['running_executable'] == str(installed), payload
                 for body in invalid_install_bodies():
                     assert_denied(request(base, 'POST', token, body=body, source=source), 400)
+                    assert_denied(request(base, 'POST', token, route='/service/update',
+                                          body=body, source=source), 400)
                 if not authenticated:
                     assert_denied(request(base, 'POST', token,
+                                          body=install_body('current'), source=source), 400)
+                    assert_denied(request(base, 'POST', token,
+                                          route='/service/update',
                                           body=install_body('current'), source=source), 400)
                 for host in ('127.0.0.1', '0.0.0.0', 'localhost', '::', 'webui.example'):
                     for port in (1, 65535):
@@ -164,6 +170,10 @@ def verify(binary):
                 for mode in ('install', 'running'):
                     for policy, secret in policies:
                         assert_denied(request(base, 'POST', token,
+                                              body=install_body(policy, secret, mode),
+                                              source=source), 403)
+                        assert_denied(request(base, 'POST', token,
+                                              route='/service/update',
                                               body=install_body(policy, secret, mode),
                                               source=source), 403)
                 for method, route in (('DELETE', '/service'), ('POST', '/service/stop')):
