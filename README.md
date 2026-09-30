@@ -209,26 +209,6 @@ Build API response bodies with `nlohmann::json` and `.dump()`, not
 handwritten serialized JSON strings. Python tests use `json.dumps`
 except when exercising malformed input or duplicate object keys.
 
-## Access and safety
-
-**Do not expose an unauthenticated listener to a network.** The
-default bind is now `127.0.0.1`, but an explicit `--host 0.0.0.0` or
-network address makes the server reachable beyond loopback. Without
-`--password-file`, anyone who can connect can change settings; even
-with a password, plain HTTP exposes it to network observers. Use the
-SSH, local TLS-proxy, or trusted VPN setups above as appropriate. Back
-up mount configuration before editing raw sources.
-
-Startup configuration edits do not remount live filesystems; after
-editing a systemd mount unit, run `systemctl daemon-reload` before
-restarting the unit. Application updates require `/usr/bin/curl`,
-`/usr/bin/sha256sum`, a compatible published release, and write access
-to the executable directory.
-
-Mount actions accept systemd unit names with a nonempty stem and a
-`.mount` or `.service` suffix; before starting one, the server
-verifies that systemd loaded the selected unit file.
-
 
 ## Support
 
